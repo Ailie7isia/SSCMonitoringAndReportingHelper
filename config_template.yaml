@@ -1,0 +1,5 @@
+securityscorecard:
+  api_key: #Complete this with your SecurityScorecard API key
+  portfolio_id: #Complete this with your SecurityScorecard portfolio ID 
+
+  #Refer to Securityscorecard to find where you API key and porfolio ID
