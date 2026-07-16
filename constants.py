@@ -5,27 +5,25 @@ ALWAYS_PINNED = {
 }
 
 OPTION_VENDORS = {
-    1 : [
+    
+    1 : [ #Biopharma
         "Bifarma.co.id",
         "innogene-kalbiotech.com",
         "Kalbio.co.id",
         "Kalgeninnolab.co.id",
         "kg-biologics.com",
-        "theracim-nimotuzumab.com",
-        "Kalgendna.co.id​"
+        "theracim-nimotuzumab.com"
     ],
-
-    2 : [
+   
+    2 : [ #Biopharma
+        "Kalgendna.co.id​",       
         "pharmametriclabs.com",
         "regenic.co.id",
         "zerpidio.com",
         "sci-indonesia.id",
-        "Bintang7.com",
-        "ejsportofficial.com",
-        "Kalbeconsumerhealth.com"
     ],
 
-    3 : [
+    3 : [ #DL
         "Emos.id",
         "Enseval.com",
         "Mostrans.co.id",
@@ -35,7 +33,7 @@ OPTION_VENDORS = {
         "gcm.co.id"
     ],
 
-    4 : [
+    4 : [ #Nutritionals
         "Blackmores.co.id",
         "entrasol.com",
         "Milna.com",
@@ -46,7 +44,7 @@ OPTION_VENDORS = {
         "Kalbenutritionals.com"
     ],
 
-    5 : [
+    5 : [ #Pharma
         "hexpharmjaya.com",
         "cdkjournal.com",
         "Kalventis.com",
@@ -56,7 +54,7 @@ OPTION_VENDORS = {
         "kalbemed.com"
     ],
 
-    6 : [
+    6 : [ #Pharma
         "klikdokter.com",
         "oneonco.co.id",
         "kpoin.com",
@@ -65,19 +63,26 @@ OPTION_VENDORS = {
         "Renalmed.co.id"
     ],
 
-    7 : [
+        7 : [ #CHD
+        "Bintang7.com",
+        "ejsportofficial.com"
+        "Kalbeconsumerhealth.com",        
+        "extrajoss.nl",       
+        "extrajossultimate.id"
+    ],
+
+    8 : [ #Others / unidentified
         "Agroveta.co.id",
         "dankosfarma.com",
         "Ihn01.com",
         "Kpoin.com",
         "Kalbeinternational.com",
         "Hydrococo.id",
-        "extrajossultimate.id",
-        "extrajoss.nl",
         "mitrakeluarga.com"
     ],
 
-    8 : [
+    # Option 9 is used to add domains that failed to be added in the previous options
+    9 : [
         "x",
         "y"
     ]    
@@ -85,11 +90,12 @@ OPTION_VENDORS = {
 
 OPTION_LABELS = {
     1: "Biopharma (1/2)",
-    2: "Biopharma (2/2) & CHD",
+    2: "Biopharma (2/2)",
     3: "DL",
     4: "Nutritionals",
     5: "Pharma (1/2)",
     6: "Pharma (2/2) & Medical Dev",
-    7: "Others",
-    8: "Failed"
+    7: "CHD",
+    8: "Others",
+    9: "Failed"
 }
