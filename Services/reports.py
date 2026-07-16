@@ -1,16 +1,24 @@
 from __future__ import annotations
 
+# -----------------------------------------------------------------------------
+# This file manages the process of retrieving SecurityScorecard reports.
+# It checks for existing reports, generates new ones when needed, waits
+# for completion, and saves the downloaded PDF files.
+# -----------------------------------------------------------------------------
+
 import logging
 import requests
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
-
 from models import Company
 from ssc_client import SecurityScorecardClient
 from utils import make_filename
 
+# -----------------------------------------------------------------------------
+
+# Check whether a recent report already exists for the company.
 def ensure_report(
     company: Company,
     report_map: dict[str, str],
@@ -18,6 +26,10 @@ def ensure_report(
 
     return report_map.get(company.domain.lower())
 
+# -----------------------------------------------------------------------------
+
+# Wait until SecurityScorecard finishes generating the report.
+# Returns the download URL when the report is ready.
 def wait_until_complete(
     client: SecurityScorecardClient,
     report_id: str,
@@ -65,6 +77,10 @@ def wait_until_complete(
         f"Timed out waiting for report {report_id}."
     )
 
+# -----------------------------------------------------------------------------
+
+# Download a report for a single company.
+# Generates a new report if no recent report is available.
 def download_single(
     client: SecurityScorecardClient,
     company: Company,
@@ -74,6 +90,7 @@ def download_single(
     report_type: str = "detailed_report",
 ) -> Path:
 
+    # Reuse an existing report when available.
     url = ensure_report(
         company,
         report_map,
@@ -135,6 +152,9 @@ def download_single(
 
     return destination
 
+# -----------------------------------------------------------------------------
+
+# Save the downloaded PDF using the standard filename format.
 def download_reports(
     client: SecurityScorecardClient,
     companies: list[Company],
@@ -148,9 +168,7 @@ def download_reports(
         exist_ok=True,
     )
 
-    #
-    # Fetch the recent report list ONCE.
-    #
+    # Fetch the recent report list once to avoid repeated API calls.
     logging.info("Fetching recent reports...")
 
     recent_reports = client.list_recent_reports()
@@ -189,6 +207,7 @@ def download_reports(
 
     saved: list[Path] = []
 
+    # Download reports concurrently to improve performance.
     with ThreadPoolExecutor(max_workers=workers) as executor:
 
         futures = {
@@ -204,6 +223,7 @@ def download_reports(
 
         completed = 0
 
+        # Process completed downloads as they finish.
         for future in as_completed(futures):
 
             company = futures[future]

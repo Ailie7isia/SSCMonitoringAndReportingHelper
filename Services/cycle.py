@@ -3,6 +3,11 @@ from __future__ import annotations
 import logging
 import time
 
+# -----------------------------------------------------------------------------
+# This file loads the current portfolio, compare it with the selected target list, 
+# and add or remove domains from portofolio according to comparison result.
+# -----------------------------------------------------------------------------
+
 from Services.portfolio import (
     apply_plan,
     companies_from_payload,
@@ -26,6 +31,7 @@ def run_cycle(
     pause_seconds: float = 0.35,
 ) -> None:
 
+    # Retrieve the current portfolio from SecurityScorecard.
     logging.info("Loading current portfolio...")
 
     start = time.perf_counter()
@@ -40,9 +46,11 @@ def run_cycle(
         time.perf_counter() - start,
     )
 
+    # Ask the user which portfolio cycle to run if not specified.
     if option is None:
         option = prompt_option()
 
+    # Compares target list to existing domains.
     target = target_domains(option)
 
     plan = compute_plan(
@@ -50,12 +58,14 @@ def run_cycle(
         target,
     )
 
+    # Display the comparison result.
     print_plan(plan)
 
     if dry_run:
         logging.info("Dry run complete.")
         return
 
+    # Ask for confirmation before making changes.
     if not assume_yes:
         if not confirm_plan():
             print("\nCancelled.")
@@ -77,8 +87,10 @@ def run_cycle(
         time.perf_counter() - start,
     )
 
+    # Display the final results of the portfolio update.
     print_summary(report)
 
+    # Log whether the operation completed successfully or with failures.
     if report.has_failures:
         logging.warning(
             "Finished with failures "

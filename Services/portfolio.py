@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+# -----------------------------------------------------------------------------#
+# This file contains the core logic for managing the SecurityScorecard
+# portfolio, including loading company data, comparing portfolio cycles,
+# and applying additions or removals.
+# -----------------------------------------------------------------------------
+
 import logging
 import time
 from typing import Iterable
@@ -23,6 +29,10 @@ from utils import (
     normalize_grade,
 )
 
+# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+
+# Ask the user to confirm before applying portfolio changes.
 def confirm_plan() -> bool:
     print()
     print("=" * 40)
@@ -37,10 +47,12 @@ def confirm_plan() -> bool:
 
     return answer == "YES"
 
+# Convert the API response into a list of Company objects.
 def companies_from_payload(entries: Iterable[dict]) -> list[Company]:
     companies: list[Company] = []
 
     for item in entries:
+        # SecurityScorecard may return the domain under different field names.
         raw_domain = item.get("domain") or item.get("website")
         if not raw_domain:
             continue
@@ -61,36 +73,45 @@ def companies_from_payload(entries: Iterable[dict]) -> list[Company]:
 
     return companies
 
+# Build the target domain list for the selected portfolio cycle.
 def target_domains(option: int) -> set[str]:
     if option not in OPTION_VENDORS:
         raise ValueError(f"Invalid cycle option: {option}")
 
+    # Always include the permanently monitored domains.
     pinned = {
         normalize_domain(domain)
         for domain in ALWAYS_PINNED
     }
 
+    # Add the domains for the selected cycle.
     selected = {
         normalize_domain(domain)
         for domain in OPTION_VENDORS[option]
     }
 
+    # Combine pinned and selected domains.
     return pinned | selected
 
+# Compare the current portfolio with the target list and determine
+# which domains need to be added or removed.
 def compute_plan(
     companies: list[Company],
     target: set[str],
 ) -> PortfolioPlan:
+    # Always keep pinned domains in the portfolio.
     pinned = {
         normalize_domain(domain)
         for domain in ALWAYS_PINNED
     }
 
     current = {
+        # Get the domains currently in the portfolio.
         company.domain
         for company in companies
     }
 
+    # Domains to remove (excluding pinned domains).
     to_remove = sorted(
         domain
         for domain in current
@@ -98,6 +119,7 @@ def compute_plan(
         and domain not in pinned
     )
 
+    # Domains that need to be added.
     to_add = sorted(
         domain
         for domain in target
@@ -109,6 +131,7 @@ def compute_plan(
         to_remove=to_remove,
     )
 
+# Apply the planned portfolio changes and record the results.
 def apply_plan(
     client: SecurityScorecardClient,
     portfolio_id: str,
@@ -118,6 +141,7 @@ def apply_plan(
 ) -> CycleApplyReport:
     report = CycleApplyReport()
 
+    # Remove domains that are no longer required.
     for domain in plan.to_remove:
 
         try:
@@ -130,9 +154,11 @@ def apply_plan(
             report.removed_failed.append((domain, str(exc)))
             logging.error("Failed removing %s: %s", domain, exc)
 
+        # Brief pause to avoid sending API requests too quickly.
         if pause_seconds > 0:
             time.sleep(pause_seconds)
 
+    # Add new domains to the portfolio.
     for domain in plan.to_add:
 
         try:
@@ -145,11 +171,13 @@ def apply_plan(
             report.added_failed.append((domain, str(exc)))
             logging.error("Failed adding %s: %s", domain, exc)
 
+        # Brief pause to avoid sending API requests too quickly.
         if pause_seconds > 0:
             time.sleep(pause_seconds)
 
     return report
 
+# Display the available portfolio cycle options and return the user's selection.
 def prompt_option() -> int:
     print("\nChoose a portfolio cycle:\n")
 
@@ -161,6 +189,7 @@ def prompt_option() -> int:
 
     print()
 
+    # Keep asking until a valid option is entered.
     while True:
         try:
             raw = input("Enter option [1-5]: ").strip()
@@ -178,6 +207,7 @@ def prompt_option() -> int:
 
         print("Invalid option.\n")
 
+# Display the planned portfolio additions and removals.
 def print_plan(plan: PortfolioPlan) -> None:
     print("\n========== PORTFOLIO PLAN ==========\n")
 
@@ -195,6 +225,7 @@ def print_plan(plan: PortfolioPlan) -> None:
 
     print()
 
+# Display a summary of the portfolio update results.
 def print_summary(report: CycleApplyReport) -> None:
     print("\n========== SUMMARY ==========\n")
 
@@ -218,9 +249,8 @@ def print_summary(report: CycleApplyReport) -> None:
 
     print()
 
-from constants import ALWAYS_PINNED, OPTION_VENDORS
-from utils import normalize_domain
-
+# Return the expected domain order for the selected portfolio cycle.
+# Pinned domains are always listed first
 def target_domain_order(option: int) -> list[str]:
     return [
         normalize_domain(domain)

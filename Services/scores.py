@@ -1,16 +1,19 @@
 from __future__ import annotations
+
+# -----------------------------------------------------------------------------
+# This file retrieves company scores from the SecurityScorecard portfolio,
+# displays a summary, and exports the results to a JSON file.
+# -----------------------------------------------------------------------------
+
 from models import Company
 from collections import Counter
 from pathlib import Path
-
 from config import load_config, validate_ssc_config
 from Services.portfolio import companies_from_payload
 from ssc_client import SecurityScorecardClient
-
 import json
-import json
-import logging
 
+# Grade sort for displays.
 GRADE_ORDER = {
     "A": 5,
     "B": 4,
@@ -19,6 +22,7 @@ GRADE_ORDER = {
     "F": 1,
 }
 
+# Display the score for each company in the portfolio.
 def display_scores(companies: list[Company]) -> None:
     print("\n========== PORTFOLIO SCORES ==========\n")
 
@@ -28,6 +32,7 @@ def display_scores(companies: list[Company]) -> None:
             f"{company.domain}"
         )
 
+# Export company information and scores to a JSON file.
 def export_scores(
     companies: list[Company],
     output_file: Path,
@@ -57,17 +62,19 @@ def export_scores(
             ensure_ascii=False,
         )
 
+# Count the number of companies for each score/grade.
 def grade_statistics(
     companies: list[Company],
 ) -> dict[str, int]:
 
     counts = Counter(
-        company.score or "Unknown"
+        company.grade or "Unknown"
         for company in companies
     )
 
-    return dict(sorted(counts.items()))
+    return dict(counts)
 
+# Main workflow for retrieving, displaying, and exporting portfolio scores.
 def run_score_export(
     *,
     config_path: Path,
@@ -93,6 +100,7 @@ def run_score_export(
         output,
     )
 
+# Print a summary of the portfolio score distribution.
 def print_statistics(companies: list[Company]) -> None:
     stats = grade_statistics(companies)
 
