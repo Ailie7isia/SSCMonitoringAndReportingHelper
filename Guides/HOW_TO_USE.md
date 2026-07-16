@@ -5,12 +5,12 @@ This guide explains how to run and use the **SecurityScorecard Portfolio Toolkit
 
 ---
 
-# Prepare
+# Preparation
 
-1. Open **Cursor** (or Visual Studio Code).
-2. Select **File → Open Folder**.
-3. Open the project folder.
-4. Locate **`main.py`** in the project explorer.
+1. Open the "config_template.yaml" file
+2. Complete the data inside
+3. Rename the file by deleting the word "_template". File name now should be "config.yaml"
+4. Do the same with "constants_template.py"
 
 
 ---
