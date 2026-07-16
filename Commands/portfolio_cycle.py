@@ -4,12 +4,17 @@ import argparse
 import logging
 import sys
 from pathlib import Path
-
 from config import CONFIG_PATH, load_config, validate_ssc_config
 from ssc_client import SecurityScorecardClient
 from Services.cycle import run_cycle
 
+# -----------------------------------------------------------------------------
+# This file is the entry point for running a portfolio cycle.
+# It reads the configuration, creates the SecurityScorecard client,
+# and starts the portfolio update workflow.
+# -----------------------------------------------------------------------------
 
+# Parse command-line arguments for the portfolio cycle command.
 def parse_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(
@@ -59,21 +64,15 @@ def main() -> None:
     args = parse_args()
 
     try:
-        #
-        # Load configuration
-        #
+        # Load application configuration.
         config = load_config(args.config)
 
         api_key, portfolio_id = validate_ssc_config(config)
 
-        #
-        # Create SSC client
-        #
+        # Create the SecurityScorecard API client.
         client = SecurityScorecardClient(api_key)
 
-        #
-        # Execute cycle
-        #
+        # Run the portfolio cycle workflow.
         run_cycle(
             client,
             portfolio_id,
@@ -83,10 +82,12 @@ def main() -> None:
             pause_seconds=args.pause,
         )
 
+    # Exit gracefully if the operation is cancelled by the user.
     except KeyboardInterrupt:
         print("\nCancelled.")
         sys.exit(130)
 
+    # Log unexpected errors and exit with a failure status.
     except Exception:
         logging.exception("Portfolio cycle failed.")
         sys.exit(1)

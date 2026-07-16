@@ -5,21 +5,25 @@ import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-
+from Services.portfolio import companies_from_payload
+from Services.reports import download_reports
+from ssc_client import SecurityScorecardClient
 from config import (
     CONFIG_PATH,
     REPORTS_DIR,
     load_config,
     validate_ssc_config,
 )
-from Services.portfolio import companies_from_payload
-from Services.reports import download_reports
-from ssc_client import SecurityScorecardClient
 
+# -----------------------------------------------------------------------------
+# This file serves as the entry point for downloading SecurityScorecard
+# reports. It loads the configuration, retrieves the portfolio, and
+# starts the report download workflow.
+# -----------------------------------------------------------------------------
 
 DEFAULT_WORKERS = 4
 
-
+# Parse command-line arguments for the report download command.
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Download SecurityScorecard reports."
@@ -59,10 +63,13 @@ def main() -> None:
     args = parse_args()
 
     try:
+        # Load application configuration.    
         config = load_config(args.config)
 
+        # Create the SecurityScorecard API client.
         api_key, portfolio_id = validate_ssc_config(config)
 
+        # Retrieve the current portfolio.
         client = SecurityScorecardClient(api_key)
 
         logging.info("Loading portfolio...")
@@ -79,11 +86,13 @@ def main() -> None:
             timezone.utc
         ).strftime("%Y-%m-%d")
 
+        # Use today's date if no output directory is specified.
         output_dir = (
             args.output_dir
             or REPORTS_DIR / "detailed" / today
         )
 
+        # Download reports for all companies in the portfolio.
         saved = download_reports(
             client,
             companies,
@@ -100,6 +109,7 @@ def main() -> None:
         print("\nCancelled.")
         sys.exit(130)
 
+    # Log unexpected errors and exit with a failure status. 
     except Exception:
         logging.exception("Report download failed.")
         sys.exit(1)
