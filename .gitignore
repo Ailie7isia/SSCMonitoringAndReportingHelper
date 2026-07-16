@@ -17,3 +17,5 @@ venv/
 
 # VS Code workspace settings (optional)
 .vscode/
+
+constants.py
