@@ -1,9 +1,19 @@
 from __future__ import annotations
 from typing import Any
 
+# -----------------------------------------------------------------------------
+# SecurityScorecard API client.
+
+# This file handles all communication with the SecurityScorecard API,
+# including retrieving portfolio data, managing companies, generating
+# reports, and downloading report files.
+# -----------------------------------------------------------------------------
+
 import requests
 import logging
 
+# Custom exception used for API request failures.
+# Includes HTTP status code and response when available.
 class ApiRequestError(RuntimeError):
     def __init__(
         self,
@@ -17,6 +27,7 @@ class ApiRequestError(RuntimeError):
         self.response = response
 
 class SecurityScorecardClient:
+    # Base URL for all SecurityScorecard API requests.
     BASE_URL = "https://api.securityscorecard.io"
 
     def __init__(
@@ -34,6 +45,8 @@ class SecurityScorecardClient:
             "Accept": "application/json",
         })
 
+    # Internal helper for making authenticated API requests.
+    # Raises ApiRequestError if the request fails or returns a non-2xx response.
     def _request(
         self,
         method: str,
@@ -53,6 +66,7 @@ class SecurityScorecardClient:
         except requests.RequestException as exc:
             raise ApiRequestError(str(exc)) from exc
 
+        # Treat any non-success response as an API error.
         if not response.ok:
             raise ApiRequestError(
                 response.text,
@@ -62,6 +76,7 @@ class SecurityScorecardClient:
 
         return response
 
+    # Retrieve all companies in the specified portfolio.
     def fetch_portfolio_companies(
         self,
         portfolio_id: str,
@@ -74,6 +89,7 @@ class SecurityScorecardClient:
 
         return r.json()["entries"]
 
+    # Add a company to the specified portfolio.
     def add_company(
         self,
         portfolio_id: str,
@@ -86,6 +102,7 @@ class SecurityScorecardClient:
             json={"domain": domain},
         )
 
+    # Remove a company from the specified portfolio.
     def remove_company(
         self,
         portfolio_id: str,
@@ -97,6 +114,9 @@ class SecurityScorecardClient:
             f"/portfolios/{portfolio_id}/companies/{domain}",
         )
 
+
+    # Request SecurityScorecard to generate a report.
+    # Returns report information, including its ID.
     def create_report(
         self,
         *,
@@ -117,6 +137,7 @@ class SecurityScorecardClient:
 
         return r.json()
 
+    # Retrieve the current status/details of a report.
     def get_report(
         self,
         report_id: str,
@@ -129,6 +150,7 @@ class SecurityScorecardClient:
 
         return r.json()
 
+    # Get the list of recently generated reports.
     def list_recent_reports(self) -> list[dict]:
 
         r = self._request(
@@ -138,6 +160,7 @@ class SecurityScorecardClient:
 
         return r.json().get("entries", [])
 
+    # Download the completed report file from its download URL.
     def download_report(
         self,
         download_url: str,
@@ -152,6 +175,7 @@ class SecurityScorecardClient:
 
         return r.content
 
+    # Retrieve company details for a given domain.
     def get_company(
         self,
         domain: str,

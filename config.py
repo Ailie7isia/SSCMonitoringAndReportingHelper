@@ -4,10 +4,15 @@ from pathlib import Path
 
 import yaml
 
+# -----------------------------------------------------------------------------
+# This file loads settings from config.yaml and validates the required SSC
+# configuration values, such as the API key and portfolio ID.
+# -----------------------------------------------------------------------------
+
 CONFIG_PATH = Path("config.yaml")
 REPORTS_DIR = Path("reports")
 
-
+# Load the application configuration from config.yaml.
 def load_config(path: Path = CONFIG_PATH) -> dict:
     if not path.exists():
         raise FileNotFoundError(f"Configuration file not found: {path}")
@@ -15,7 +20,8 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
     with path.open("r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
-
+# Ensure the required SecurityScorecard settings are present.
+# Returns (api_key, portfolio_id) if validation succeeds.
 def validate_ssc_config(config: dict) -> tuple[str, str]:
     ssc = config.get("securityscorecard", {})
 

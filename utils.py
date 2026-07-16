@@ -1,19 +1,35 @@
 from __future__ import annotations
 import re
 
+# -----------------------------------------------------------------------------
+# This file contains small helper functions that are shared by different
+# parts of the program, such as:
+# - formatting filenames for downloaded reports,
+# - cleaning up company names and domains,
+# - standardizing SecurityScorecard data,
+# - validating the application configuration.
+
+# Keeping these common functions in one place avoids repeating the same
+# code in multiple files and makes future maintenance easier.
+# -----------------------------------------------------------------------------
+
+# Regex patterns used for filename sanitization.
 _INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1F]')
 _MULTIPLE_SPACES = re.compile(r"\s+")
-
 
 from pathlib import Path
 from typing import Iterable
 
+# Normalize grade by capitaling string.
 def normalize_grade(value: object) -> str:
     return str(value or "").strip().upper()
 
+# Normalize a domain by removing whitespace and converting to lowercase.
 def normalize_domain(value: str) -> str:
     return value.strip().lower()
 
+# Remove characters that are invalid in filenames and clean up spacing.
+# Returns "Unknown" if the resulting filename is empty.
 def sanitize_filename(name: str, replacement: str = "_") -> str:
     if not name:
         return "Unknown"
@@ -28,6 +44,7 @@ def sanitize_filename(name: str, replacement: str = "_") -> str:
 
     return name or "Unknown"
 
+# Generate a standardized filename for downloaded reports.
 def make_filename(
     grade: str,
     company_name: str,
@@ -35,11 +52,13 @@ def make_filename(
     report_type: str,
 ) -> str:
 
+    # Convert API report type for easier reading.
     report_name = {
         "detailed_report": "Detailed Report",
         "issue_report": "Issue Report",
     }.get(report_type, report_type)
 
+    # Remove invalid filename characters from the company name.
     safe_name = sanitize_filename(company_name)
 
     return (
@@ -47,6 +66,8 @@ def make_filename(
         f"{report_name} - {month}.pdf"
     )
 
+# Validate the SecurityScorecard configuration before making API calls.
+# Returns the API key and portfolio ID if both are valid.
 def validate_ssc_config(config: dict) -> tuple[str, str]:
     ssc = config.get("securityscorecard") or {}
     api_key = str(ssc.get("api_key") or "").strip()
