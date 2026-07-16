@@ -16,7 +16,7 @@ MENU = {
 
 def print_banner() -> None:
     print("=" * 45)
-    print(" SecurityScorecard Portfolio Toolkit")
+    print(" SecurityScorecard Monitoring and Reporting Helper")
     print("=" * 45)
     print()
 
@@ -33,22 +33,28 @@ def main() -> None:
 
     while True:
 
+        # Refresh menu every iteration.
         print_banner()
         print_menu()
 
         try:
+            # Remove accidental whitespace from user input.
             choice = input("Select an option: ").strip()
 
+        # Handle program termination from the console gracefully.
         except (EOFError, KeyboardInterrupt):
             print("\nGoodbye.")
             return
 
+        # User selected Exit.
         if choice == "0":
             print("Goodbye.")
             return
 
+        # Retrieve the selected command from the MENU dictionary.
         command = MENU.get(choice)
 
+        # Handle invalid menu selections.
         if command is None:
             print("\nInvalid option.\n")
             continue
@@ -58,6 +64,8 @@ def main() -> None:
         try:
             command[1]()
 
+        # Prevent Ctrl+C inside a command from terminating the toolkit.
+        # Instead, return safely to the main menu.
         except KeyboardInterrupt:
             print("\nOperation cancelled.")
 
