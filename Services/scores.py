@@ -38,6 +38,84 @@ class ScoreTrend:
     year_over_year: float | None
 
 
+@dataclass(frozen=True, slots=True)
+class HistoricalScoreTrend:
+    """A workbook domain's calendar-month scores and movement."""
+
+    this_month_score: float | None
+    last_month_score: float | None
+    month_over_month: float | None
+    year_over_year: float | None
+
+
+def score_trends_from_history(
+    history_file: Path = SCORE_HISTORY_PATH,
+) -> dict[str, HistoricalScoreTrend]:
+    """Return trends for every domain recorded in the score-history workbook.
+
+    Unlike :func:`score_trends_for_companies`, this does not require a domain
+    to still be in the live portfolio. Scores are based on the newest saved
+    entry in each calendar month. A missing current-month entry remains empty.
+    """
+    if not history_file.exists():
+        return {}
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    this_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    last_month_end = this_month_start
+    last_month_start = (last_month_end - timedelta(days=1)).replace(day=1)
+    last_year_month_start = this_month_start.replace(year=this_month_start.year - 1)
+    last_year_month_end = (last_year_month_start + timedelta(days=32)).replace(day=1)
+    observations: dict[str, list[tuple[datetime, float]]] = {}
+    try:
+        workbook = load_workbook(history_file, read_only=True, data_only=True)
+        worksheet = workbook.active
+        for timestamp, logged_domain, _name, score, _grade in worksheet.iter_rows(
+            min_row=3, max_col=5, values_only=True
+        ):
+            if not isinstance(timestamp, datetime) or not logged_domain:
+                continue
+            try:
+                numeric_score = float(score)
+            except (TypeError, ValueError):
+                continue
+            domain = str(logged_domain).strip().lower()
+            if domain:
+                observations.setdefault(domain, []).append((timestamp.replace(tzinfo=None), numeric_score))
+        workbook.close()
+    except (OSError, ValueError):
+        return {}
+
+    trends: dict[str, HistoricalScoreTrend] = {}
+    for domain, values in observations.items():
+        def latest_in_period(start: datetime, end: datetime) -> float | None:
+            entry = max(
+                (item for item in values if start <= item[0] < end),
+                default=None,
+                key=lambda item: item[0],
+            )
+            return entry[1] if entry else None
+
+        this_month_score = latest_in_period(this_month_start, now + timedelta(days=1))
+        last_month_score = latest_in_period(last_month_start, last_month_end)
+        last_year_score = latest_in_period(last_year_month_start, last_year_month_end)
+        trends[domain] = HistoricalScoreTrend(
+            this_month_score=this_month_score,
+            last_month_score=last_month_score,
+            month_over_month=(
+                this_month_score - last_month_score
+                if this_month_score is not None and last_month_score is not None
+                else None
+            ),
+            year_over_year=(
+                this_month_score - last_year_score
+                if this_month_score is not None and last_year_score is not None
+                else None
+            ),
+        )
+    return trends
+
+
 def score_trends_for_companies(
     companies: list[Company],
     history_file: Path = SCORE_HISTORY_PATH,
@@ -182,6 +260,36 @@ def append_score_history(
 
     workbook.save(output_file)
     return len(companies)
+
+
+def current_month_history_status(
+    history_file: Path = SCORE_HISTORY_PATH,
+) -> tuple[datetime | None, int]:
+    """Return the newest current-month export timestamp and its record count.
+
+    The workbook is opened read-only, keeping this safe to call while building
+    the dashboard and before an export is started.
+    """
+    if not history_file.exists():
+        return None, 0
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    newest: datetime | None = None
+    count = 0
+    try:
+        workbook = load_workbook(history_file, read_only=True, data_only=True)
+        worksheet = workbook.active
+        for (timestamp,) in worksheet.iter_rows(min_row=3, max_col=1, values_only=True):
+            if isinstance(timestamp, datetime) and month_start <= timestamp.replace(tzinfo=None) <= now:
+                count += 1
+                timestamp = timestamp.replace(tzinfo=None)
+                if newest is None or timestamp > newest:
+                    newest = timestamp
+        workbook.close()
+    except (OSError, ValueError):
+        return None, 0
+    return newest, count
 
 # Count the number of companies for each score/grade.
 def grade_statistics(

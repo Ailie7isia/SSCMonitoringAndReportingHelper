@@ -22,9 +22,10 @@ from Services.reports import download_reports
 from Services.scores import (
     SCORE_HISTORY_PATH,
     append_score_history,
+    current_month_history_status,
     grade_statistics,
     score_change_over_past_month,
-    score_trends_for_companies,
+    score_trends_from_history,
 )
 from ssc_client import ApiRequestError, SecurityScorecardClient
 from utils import sanitize_filename
@@ -68,30 +69,40 @@ class Dashboard(ctk.CTk):
         sidebar.grid(row=0, column=0, rowspan=2, sticky="nsew")
         sidebar.grid_propagate(False)
         ctk.CTkLabel(sidebar, text="SSC", font=("Segoe UI", 29, "bold"), text_color=ACCENT).pack(anchor="w", padx=27, pady=(31, 0))
-        ctk.CTkLabel(sidebar, text="MONITORING HELPER", font=("Segoe UI", 11, "bold"), text_color=MUTED).pack(anchor="w", padx=29, pady=(0, 37))
+        ctk.CTkLabel(sidebar, text="MONITORING HELPER", font=("Segoe UI", 14, "bold"), text_color=MUTED).pack(anchor="w", padx=29, pady=(0, 37))
         self.operation_buttons: list[ctk.CTkButton] = []
         self._side_button(sidebar, "↻   Refresh portfolio", self.refresh_dashboard)
         self._side_button(sidebar, "◈   Run portfolio cycle", self.open_cycle_dialog)
         self._side_button(sidebar, "↓   Generate & download reports", self.start_reports_download)
         self._side_button(sidebar, "▣   Open reports folder", self.open_reports_folder)
         self._side_button(sidebar, "↑   Update score history", self.start_score_export)
+        self.history_status = ctk.CTkLabel(
+            sidebar,
+            text="Checking score history…",
+            justify="left",
+            font=("Segoe UI", 14),
+            text_color=MUTED,
+        )
+        self.history_status.pack(anchor="w", padx=29, pady=(6, 0))
+        self._update_history_status()
         self._side_button(sidebar, "↗   View score trends", self.open_score_trends)
-        ctk.CTkLabel(sidebar, text="SECURE WORKFLOW", font=("Segoe UI", 11, "bold"), text_color=MUTED).pack(anchor="w", padx=29, pady=(35, 8))
-        ctk.CTkLabel(sidebar, text="Portfolio changes always\nrequire confirmation.", justify="left", font=("Segoe UI", 12), text_color="#C8D5DD").pack(anchor="w", padx=29)
-        self.sidebar_status = ctk.CTkLabel(sidebar, text="●  Ready", font=("Segoe UI", 12, "bold"), text_color=ACCENT)
+        ctk.CTkLabel(sidebar, text="SECURE WORKFLOW", font=("Segoe UI", 14, "bold"), text_color=MUTED).pack(anchor="w", padx=29, pady=(35, 8))
+        ctk.CTkLabel(sidebar, text="Portfolio changes always\nrequire confirmation.", justify="left", font=("Segoe UI", 14), text_color="#C8D5DD").pack(anchor="w", padx=29)
+        self.sidebar_status = ctk.CTkLabel(sidebar, text="●  Ready", font=("Segoe UI", 14, "bold"), text_color=ACCENT)
         self.sidebar_status.pack(side="bottom", anchor="w", padx=29, pady=28)
 
-        header = ctk.CTkFrame(self, height=112, corner_radius=0, fg_color=BACKGROUND)
-        header.grid(row=0, column=1, sticky="new", padx=35)
-        header.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(header, text="SSC Monitoring Helper", font=("Segoe UI", 29, "bold")).grid(row=0, column=0, sticky="sw", pady=(25, 0))
-        self.last_updated = ctk.CTkLabel(header, text="Loading portfolio data…", font=("Segoe UI", 12), text_color=MUTED)
+        self.dashboard_header = ctk.CTkFrame(self, height=112, corner_radius=0, fg_color=BACKGROUND)
+        self.dashboard_header.grid(row=0, column=1, sticky="new", padx=35)
+        self.dashboard_header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(self.dashboard_header, text="SSC Monitoring Helper", font=("Segoe UI", 29, "bold")).grid(row=0, column=0, sticky="sw", pady=(25, 0))
+        self.last_updated = ctk.CTkLabel(self.dashboard_header, text="Loading portfolio data…", font=("Segoe UI", 14), text_color=MUTED)
         self.last_updated.grid(row=1, column=0, sticky="nw", pady=(2, 0))
-        self.refresh_button = ctk.CTkButton(header, text="Refresh now", width=125, height=34, command=self.refresh_dashboard, fg_color=PANEL_ALT, hover_color="#2C4354")
+        self.refresh_button = ctk.CTkButton(self.dashboard_header, text="Refresh now", width=125, height=34, command=self.refresh_dashboard, fg_color=PANEL_ALT, hover_color="#2C4354", font=("Segoe UI", 14))
         self.refresh_button.grid(row=0, column=1, rowspan=2, sticky="e")
 
-        body = ctk.CTkScrollableFrame(self, fg_color=BACKGROUND, corner_radius=0)
-        body.grid(row=1, column=1, sticky="nsew", padx=(31, 23), pady=(0, 20))
+        self.dashboard_body = ctk.CTkScrollableFrame(self, fg_color=BACKGROUND, corner_radius=0)
+        self.dashboard_body.grid(row=1, column=1, sticky="nsew", padx=(31, 23), pady=(0, 20))
+        body = self.dashboard_body
         body.grid_columnconfigure((0, 1, 2), weight=1)
         self.metric_values: dict[str, ctk.CTkLabel] = {}
         self.metric_subtitles: dict[str, ctk.CTkLabel] = {}
@@ -109,7 +120,7 @@ class Dashboard(ctk.CTk):
         domains.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=7, pady=7)
         domains.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(domains, text="Currently active domains", font=("Segoe UI", 17, "bold")).grid(row=0, column=0, sticky="w", padx=20, pady=(17, 1))
-        ctk.CTkLabel(domains, text="Live scores are color-coded by company grade", font=("Segoe UI", 12), text_color=MUTED).grid(row=1, column=0, sticky="w", padx=20)
+        ctk.CTkLabel(domains, text="Live scores are color-coded by company grade", font=("Segoe UI", 14), text_color=MUTED).grid(row=1, column=0, sticky="w", padx=20)
         self.domain_rows = ctk.CTkScrollableFrame(domains, height=245, fg_color="#0E1821", corner_radius=9)
         self.domain_rows.grid(row=2, column=0, sticky="ew", padx=20, pady=(12, 20))
         self.domain_rows.grid_columnconfigure(0, weight=1)
@@ -118,16 +129,16 @@ class Dashboard(ctk.CTk):
         actions = ctk.CTkFrame(body, fg_color=PANEL, corner_radius=14)
         actions.grid(row=1, column=2, sticky="nsew", padx=7, pady=7)
         ctk.CTkLabel(actions, text="Recommended next step", font=("Segoe UI", 17, "bold")).pack(anchor="w", padx=20, pady=(18, 5))
-        self.recommendation = ctk.CTkLabel(actions, text="Load the portfolio to see a tailored recommendation.", justify="left", wraplength=240, font=("Segoe UI", 13), text_color="#D5E0E6")
+        self.recommendation = ctk.CTkLabel(actions, text="Load the portfolio to see a tailored recommendation.", justify="left", wraplength=240, font=("Segoe UI", 14), text_color="#D5E0E6")
         self.recommendation.pack(anchor="w", padx=20, pady=(0, 17))
-        self.action_button = ctk.CTkButton(actions, text="Run portfolio cycle", command=self.open_cycle_dialog, fg_color=ACCENT, hover_color="#249E74")
+        self.action_button = ctk.CTkButton(actions, text="Run portfolio cycle", command=self.open_cycle_dialog, fg_color=ACCENT, hover_color="#249E74", font=("Segoe UI", 14))
         self.action_button.pack(fill="x", padx=20, pady=(0, 19))
 
         activity = ctk.CTkFrame(body, fg_color=PANEL, corner_radius=14)
         activity.grid(row=2, column=0, columnspan=3, sticky="nsew", padx=7, pady=(15, 8))
         activity.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(activity, text="Activity", font=("Segoe UI", 17, "bold")).grid(row=0, column=0, sticky="w", padx=20, pady=(17, 7))
-        self.activity = ctk.CTkTextbox(activity, height=188, font=("Cascadia Mono", 12), fg_color="#0E1821", border_width=0)
+        self.activity = ctk.CTkTextbox(activity, height=188, font=("Cascadia Mono", 14), fg_color="#0E1821", border_width=0)
         self.activity.grid(row=1, column=0, sticky="nsew", padx=20, pady=(0, 20))
         self.activity.tag_config("failure", foreground="#FF6B73")
         self.activity.insert("end", "Monitoring Helper started. Loading current portfolio…\n")
@@ -139,10 +150,10 @@ class Dashboard(ctk.CTk):
         panel = ctk.CTkFrame(self.loading_overlay, width=520, height=250, fg_color=PANEL, corner_radius=18)
         panel.place(relx=0.5, rely=0.5, anchor="center")
         panel.pack_propagate(False)
-        ctk.CTkLabel(panel, text="SECURITYSCORECARD", font=("Segoe UI", 12, "bold"), text_color=ACCENT).pack(pady=(45, 8))
+        ctk.CTkLabel(panel, text="SECURITYSCORECARD", font=("Segoe UI", 14, "bold"), text_color=ACCENT).pack(pady=(45, 8))
         self.loading_title = ctk.CTkLabel(panel, text="Loading portfolio", font=("Segoe UI", 25, "bold"))
         self.loading_title.pack(pady=(0, 8))
-        ctk.CTkLabel(panel, text="Please wait — Monitoring Helper will update automatically.", font=("Segoe UI", 13), text_color=MUTED).pack(pady=(0, 25))
+        ctk.CTkLabel(panel, text="Please wait — Monitoring Helper will update automatically.", font=("Segoe UI", 14), text_color=MUTED).pack(pady=(0, 25))
         self.loading_bar = ctk.CTkProgressBar(panel, width=390, height=14, mode="indeterminate", progress_color=ACCENT)
         self.loading_bar.pack()
 
@@ -154,10 +165,10 @@ class Dashboard(ctk.CTk):
     @staticmethod
     def _metric_card(parent: ctk.CTkFrame, title: str, value: str, subtitle: str, color: str) -> ctk.CTkFrame:
         card = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=14)
-        ctk.CTkLabel(card, text=title.upper(), font=("Segoe UI", 10, "bold"), text_color=MUTED).pack(anchor="w", padx=19, pady=(16, 0))
+        ctk.CTkLabel(card, text=title.upper(), font=("Segoe UI", 14, "bold"), text_color=MUTED).pack(anchor="w", padx=19, pady=(16, 0))
         label = ctk.CTkLabel(card, text=value, font=("Segoe UI", 30, "bold"), text_color=color)
         label.pack(anchor="w", padx=19, pady=(1, 0))
-        subtitle_label = ctk.CTkLabel(card, text=subtitle, font=("Segoe UI", 11), text_color=MUTED)
+        subtitle_label = ctk.CTkLabel(card, text=subtitle, font=("Segoe UI", 14), text_color=MUTED)
         subtitle_label.pack(anchor="w", padx=19, pady=(0, 15))
         card.value_label = label  # type: ignore[attr-defined]
         card.subtitle_label = subtitle_label  # type: ignore[attr-defined]
@@ -187,6 +198,21 @@ class Dashboard(ctk.CTk):
 
     def _log(self, text: str) -> None:
         self.log_queue.put(text)
+
+    def _update_history_status(self) -> tuple[datetime | None, int]:
+        """Show whether this month's score snapshot is already in Excel."""
+        saved_at, records = current_month_history_status()
+        if saved_at is None:
+            self.history_status.configure(
+                text="○  This month not saved\nto score history",
+                text_color="#F2B84B",
+            )
+        else:
+            self.history_status.configure(
+                text=f"✓  History saved this month\n{saved_at:%d %b %Y, %H:%M} • {records} records",
+                text_color=ACCENT,
+            )
+        return saved_at, records
 
     def _poll_log_queue(self) -> None:
         try:
@@ -296,7 +322,7 @@ class Dashboard(ctk.CTk):
         for widget in self.domain_rows.winfo_children():
             widget.destroy()
         if not companies:
-            ctk.CTkLabel(self.domain_rows, text="No active domains loaded yet.", text_color=MUTED).grid(row=0, column=0, sticky="w", padx=12, pady=12)
+            ctk.CTkLabel(self.domain_rows, text="No active domains loaded yet.", font=("Segoe UI", 14), text_color=MUTED).grid(row=0, column=0, sticky="w", padx=12, pady=12)
             return
         for row, company in enumerate(sorted(companies, key=lambda item: item.domain.lower())):
             grade = company.grade.upper() if company.grade else "Unknown"
@@ -311,11 +337,11 @@ class Dashboard(ctk.CTk):
                 command=lambda selected=company: self.open_domain_details(selected),
                 fg_color="transparent",
                 hover_color=PANEL_ALT,
-                font=("Segoe UI", 13),
+                font=("Segoe UI", 14),
             ).grid(row=0, column=0, sticky="ew", padx=(3, 12), pady=2)
             score = "—" if company.score is None else str(company.score)
-            ctk.CTkLabel(line, text=score, width=48, corner_radius=7, fg_color=color, text_color="#10202A", font=("Segoe UI", 12, "bold")).grid(row=0, column=1, padx=(0, 7), pady=4)
-            ctk.CTkLabel(line, text=grade, width=58, text_color=color, font=("Segoe UI", 11, "bold")).grid(row=0, column=2, padx=(0, 7), pady=4)
+            ctk.CTkLabel(line, text=score, width=48, corner_radius=7, fg_color=color, text_color="#10202A", font=("Segoe UI", 14, "bold")).grid(row=0, column=1, padx=(0, 7), pady=4)
+            ctk.CTkLabel(line, text=grade, width=58, text_color=color, font=("Segoe UI", 14, "bold")).grid(row=0, column=2, padx=(0, 7), pady=4)
 
     def open_cycle_dialog(self) -> None:
         if self.busy:
@@ -326,7 +352,7 @@ class Dashboard(ctk.CTk):
         dialog.resizable(False, False)
         dialog.grab_set()
         ctk.CTkLabel(dialog, text="Choose a portfolio cycle", font=("Segoe UI", 22, "bold")).pack(anchor="w", padx=28, pady=(28, 3))
-        ctk.CTkLabel(dialog, text="The planned additions and removals will be shown before any changes are made.", justify="left", wraplength=390, text_color=MUTED).pack(anchor="w", padx=28, pady=(0, 18))
+        ctk.CTkLabel(dialog, text="The planned additions and removals will be shown before any changes are made.", justify="left", wraplength=390, font=("Segoe UI", 14), text_color=MUTED).pack(anchor="w", padx=28, pady=(0, 18))
         cycle_options = sorted(OPTION_VENDORS)
         selected = ctk.IntVar(value=cycle_options[0])
         for option in cycle_options:
@@ -341,7 +367,7 @@ class Dashboard(ctk.CTk):
         def continue_cycle() -> None:
             dialog.destroy()
             self._run_cycle(selected.get())
-        ctk.CTkButton(dialog, text="Review and continue", command=continue_cycle, height=40, fg_color=ACCENT, hover_color="#249E74").pack(fill="x", padx=28, pady=27)
+        ctk.CTkButton(dialog, text="Review and continue", command=continue_cycle, height=40, fg_color=ACCENT, hover_color="#249E74", font=("Segoe UI", 14)).pack(fill="x", padx=28, pady=27)
 
     def _run_cycle(self, option: int) -> None:
         def cycle() -> None:
@@ -454,14 +480,14 @@ class Dashboard(ctk.CTk):
         ctk.CTkLabel(
             dialog,
             text=f"{len(issues)} finding(s) from {issue_report.parent.parent.name} • SecurityScorecard Issues report",
-            font=("Segoe UI", 12),
+            font=("Segoe UI", 14),
             text_color=MUTED,
         ).grid(row=1, column=0, sticky="w", padx=28, pady=(2, 14))
         findings = ctk.CTkScrollableFrame(dialog, fg_color=BACKGROUND, corner_radius=0)
         findings.grid(row=2, column=0, sticky="nsew", padx=20, pady=(0, 20))
         findings.grid_columnconfigure(0, weight=1)
         if not issues:
-            ctk.CTkLabel(findings, text="SecurityScorecard reported no issues in this download.", text_color=MUTED).grid(
+            ctk.CTkLabel(findings, text="SecurityScorecard reported no issues in this download.", font=("Segoe UI", 14), text_color=MUTED).grid(
                 row=0, column=0, sticky="w", padx=12, pady=16
             )
             return
@@ -478,56 +504,103 @@ class Dashboard(ctk.CTk):
                 card,
                 text=f"{severity}  •  {issue.get('FACTOR NAME') or 'Uncategorized'}  •  {issue.get('STATUS') or 'Active'}",
                 anchor="w",
-                font=("Segoe UI", 11, "bold"),
+                font=("Segoe UI", 14, "bold"),
                 text_color=GRADE_COLORS.get("F" if severity in {"HIGH", "CRITICAL"} else "C", "#F2B84B"),
             ).grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 8))
             target = issue.get("TARGET") or issue.get("HOSTNAME") or issue.get("IP ADDRESSES")
             if target:
-                ctk.CTkLabel(card, text=f"Affected: {target}", anchor="w", font=("Segoe UI", 12), text_color=MUTED, wraplength=700).grid(
+                ctk.CTkLabel(card, text=f"Affected: {target}", anchor="w", font=("Segoe UI", 14), text_color=MUTED, wraplength=700).grid(
                     row=2, column=0, sticky="ew", padx=16, pady=(0, 8)
                 )
             recommendation = issue.get("ISSUE RECOMMENDATION") or "No recommendation was included in this report."
-            ctk.CTkLabel(card, text=f"Recommended solution\n{recommendation}", anchor="w", justify="left", font=("Segoe UI", 12), wraplength=700).grid(
+            ctk.CTkLabel(card, text=f"Recommended solution\n{recommendation}", anchor="w", justify="left", font=("Segoe UI", 14), wraplength=700).grid(
                 row=3, column=0, sticky="ew", padx=16, pady=(0, 15)
             )
 
     def open_score_trends(self) -> None:
-        """Show the active portfolio's 30-day and 365-day score movement."""
+        """Load score history without freezing the interface."""
         if not self.current_companies:
             self._log("• Refresh the portfolio before viewing score trends.")
             return
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Score trends")
-        dialog.geometry("900x620")
-        dialog.minsize(720, 460)
-        dialog.configure(fg_color=BACKGROUND)
-        dialog.grid_columnconfigure(0, weight=1)
-        dialog.grid_rowconfigure(2, weight=1)
-        ctk.CTkLabel(dialog, text="Score trends", font=("Segoe UI", 25, "bold")).grid(
-            row=0, column=0, sticky="w", padx=28, pady=(27, 0)
+        if self.busy:
+            return
+        self._set_busy(True, "Loading score trends")
+
+        def load() -> None:
+            try:
+                history_trends = score_trends_from_history()
+                self.after(0, lambda: self._show_score_trends(history_trends))
+            except Exception as exc:
+                self.after(0, lambda: self._log(f"✗ Could not load score trends: {exc}"))
+            finally:
+                self.after(0, lambda: self._set_busy(False))
+
+        threading.Thread(target=load, daemon=True).start()
+
+    def _show_score_trends(self, history_trends: dict[str, object]) -> None:
+        """Display the loaded score history in the trend page."""
+        if getattr(self, "trends_page", None) is not None:
+            self.trends_page.destroy()
+        self.dashboard_header.grid_remove()
+        self.dashboard_body.grid_remove()
+
+        self.trends_page = ctk.CTkFrame(self, fg_color=BACKGROUND, corner_radius=0)
+        self.trends_page.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(31, 23), pady=(0, 20))
+        self.trends_page.grid_columnconfigure(0, weight=1)
+        # Keep the descriptive text compact so the results container receives
+        # the available vertical space instead of leaving a large gap above it.
+        self.trends_page.grid_rowconfigure(3, weight=1, minsize=540)
+        ctk.CTkButton(
+            self.trends_page, text="←  Back to dashboard", command=self.close_score_trends,
+            width=170, height=32, fg_color="transparent", hover_color=PANEL_ALT, anchor="w", font=("Segoe UI", 14),
+        ).grid(row=0, column=0, sticky="w", padx=4, pady=(22, 0))
+        ctk.CTkLabel(self.trends_page, text="Score trends", font=("Segoe UI", 25, "bold")).grid(
+            row=1, column=0, sticky="w", padx=4, pady=(13, 0)
         )
         ctk.CTkLabel(
-            dialog,
-            text="MoM and YoY compare today’s live score with the latest saved score at least 30 or 365 days old.",
-            font=("Segoe UI", 12),
+            self.trends_page,
+            text="Scores use the newest saved entry in each calendar month. Missing current-month updates display as —.",
+            font=("Segoe UI", 14),
             text_color=MUTED,
-        ).grid(row=1, column=0, sticky="w", padx=28, pady=(2, 14))
+        ).grid(row=2, column=0, sticky="nw", padx=4, pady=(2, 14))
 
-        content = ctk.CTkFrame(dialog, fg_color=PANEL, corner_radius=14)
-        content.grid(row=2, column=0, sticky="nsew", padx=28, pady=(0, 28))
+        content = ctk.CTkFrame(self.trends_page, height=540, fg_color=PANEL, corner_radius=14)
+        content.grid(row=3, column=0, sticky="nsew", padx=4, pady=(0, 8))
         content.grid_columnconfigure(0, weight=1)
-        trends = score_trends_for_companies(self.current_companies)
         mode = ctk.StringVar(value="All active domains")
+        search_text = ctk.StringVar()
+        grade_filter = ctk.StringVar(value="All grades")
         switcher = ctk.CTkSegmentedButton(
             content,
-            values=["All active domains", "Kalbe.co.id only"],
+            values=["All active domains", "All logged domains"],
             variable=mode,
             width=330,
+            font=("Segoe UI", 14),
         )
-        switcher.grid(row=0, column=0, sticky="w", padx=20, pady=(18, 12))
+        switcher.grid(row=0, column=0, sticky="w", padx=20, pady=(18, 8))
+        filters = ctk.CTkFrame(content, fg_color="transparent")
+        filters.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 12))
+        filters.grid_columnconfigure(0, weight=1)
+        search = ctk.CTkEntry(
+            filters,
+            textvariable=search_text,
+            placeholder_text="Search domains…",
+            height=36,
+            font=("Segoe UI", 14),
+        )
+        search.grid(row=0, column=0, sticky="ew", padx=(0, 12))
+        grade_menu = ctk.CTkOptionMenu(
+            filters,
+            variable=grade_filter,
+            values=["All grades", "A (90–100)", "B (80–89)", "C (70–79)", "D (60–69)", "F (0–59)", "No score"],
+            height=36,
+            font=("Segoe UI", 14),
+            dropdown_font=("Segoe UI", 14),
+        )
+        grade_menu.grid(row=0, column=1, sticky="e")
         table = ctk.CTkScrollableFrame(content, fg_color="#0E1821", corner_radius=9)
-        table.grid(row=1, column=0, sticky="nsew", padx=20, pady=(0, 20))
-        content.grid_rowconfigure(1, weight=1)
+        table.grid(row=2, column=0, sticky="nsew", padx=20, pady=(0, 20))
+        content.grid_rowconfigure(2, weight=1)
         table.grid_columnconfigure(0, weight=1)
 
         def delta(value: float | None) -> tuple[str, str]:
@@ -539,37 +612,97 @@ class Dashboard(ctk.CTk):
                 return f"↓ −{abs(value):.0f}", "#EE5D69"
             return "→ 0", MUTED
 
+        def score_grade(score: float | None) -> str:
+            if score is None:
+                return "No score"
+            if score >= 90:
+                return "A"
+            if score >= 80:
+                return "B"
+            if score >= 70:
+                return "C"
+            if score >= 60:
+                return "D"
+            return "F"
+
         def render(_selection: str = "") -> None:
             for widget in table.winfo_children():
                 widget.destroy()
-            headers = (("Domain", "w"), ("Score", "e"), ("MoM", "e"), ("YoY", "e"))
+            headers = (("Domain", "w"), ("This month score", "e"), ("Last month score", "e"), ("MoM", "e"), ("YoY", "e"))
             for column, (label, anchor) in enumerate(headers):
                 table.grid_columnconfigure(column, weight=1 if column == 0 else 0)
-                ctk.CTkLabel(table, text=label.upper(), anchor=anchor, font=("Segoe UI", 10, "bold"), text_color=MUTED).grid(
+                ctk.CTkLabel(
+                    table,
+                    text=label.upper(),
+                    anchor=anchor,
+                    font=("Segoe UI", 16 if label == "MoM" else 14, "bold"),
+                    text_color=ACCENT if label == "MoM" else MUTED,
+                ).grid(
                     row=0, column=column, sticky="ew", padx=12, pady=(10, 7)
                 )
-            visible = self.current_companies
-            if mode.get() == "Kalbe.co.id only":
-                visible = [company for company in visible if company.domain.lower() == "kalbe.co.id"]
-            if not visible:
-                ctk.CTkLabel(table, text="No matching active domain is available.", text_color=MUTED).grid(
-                    row=1, column=0, columnspan=4, sticky="w", padx=12, pady=12
+            if mode.get() == "All active domains":
+                rows = [
+                    (company.domain, history_trends.get(company.domain.lower()))
+                    for company in self.current_companies
+                ]
+            else:
+                rows = [
+                    (domain, trend)
+                    for domain, trend in history_trends.items()
+                ]
+            query = search_text.get().strip().lower()
+            selected_grade = "No score" if grade_filter.get() == "No score" else grade_filter.get().split(" ", 1)[0]
+            rows = [
+                (domain, trend)
+                for domain, trend in rows
+                if (not query or query in domain.lower())
+                and (selected_grade == "All" or score_grade(trend.this_month_score if trend else None) == selected_grade)
+            ]
+            if not rows:
+                ctk.CTkLabel(table, text="No domains match the current search and grade filter.", font=("Segoe UI", 14), text_color=MUTED).grid(
+                    row=1, column=0, columnspan=5, sticky="w", padx=12, pady=12
                 )
                 return
-            for row, company in enumerate(sorted(visible, key=lambda item: item.domain.lower()), start=1):
-                trend = trends.get(company.domain.lower())
+            for row, (domain, trend) in enumerate(sorted(rows, key=lambda item: item[0].lower()), start=1):
                 month_text, month_color = delta(trend.month_over_month if trend else None)
                 year_text, year_color = delta(trend.year_over_year if trend else None)
-                score = "—" if company.score is None else f"{company.score:.0f}"
-                ctk.CTkLabel(table, text=company.domain, anchor="w", font=("Segoe UI", 13)).grid(row=row, column=0, sticky="ew", padx=12, pady=6)
-                ctk.CTkLabel(table, text=score, anchor="e", font=("Segoe UI", 13, "bold")).grid(row=row, column=1, sticky="ew", padx=12, pady=6)
-                ctk.CTkLabel(table, text=month_text, anchor="e", text_color=month_color, font=("Segoe UI", 13, "bold")).grid(row=row, column=2, sticky="ew", padx=12, pady=6)
-                ctk.CTkLabel(table, text=year_text, anchor="e", text_color=year_color, font=("Segoe UI", 13, "bold")).grid(row=row, column=3, sticky="ew", padx=12, pady=6)
+                this_month_score = "—" if trend is None or trend.this_month_score is None else f"{trend.this_month_score:.0f}"
+                last_month_score = "—" if trend is None or trend.last_month_score is None else f"{trend.last_month_score:.0f}"
+                month_background = "#164737" if month_text.startswith("↑") else "#4A2730" if month_text.startswith("↓") else PANEL_ALT
+                ctk.CTkLabel(table, text=domain, anchor="w", font=("Segoe UI", 14)).grid(row=row, column=0, sticky="ew", padx=12, pady=6)
+                ctk.CTkLabel(table, text=this_month_score, anchor="e", font=("Segoe UI", 14, "bold")).grid(row=row, column=1, sticky="ew", padx=12, pady=6)
+                ctk.CTkLabel(table, text=last_month_score, anchor="e", font=("Segoe UI", 14)).grid(row=row, column=2, sticky="ew", padx=12, pady=6)
+                ctk.CTkLabel(
+                    table,
+                    text=month_text,
+                    width=82,
+                    corner_radius=7,
+                    fg_color=month_background,
+                    anchor="e",
+                    text_color=month_color,
+                    font=("Segoe UI", 16, "bold"),
+                ).grid(row=row, column=3, sticky="e", padx=12, pady=6)
+                ctk.CTkLabel(table, text=year_text, anchor="e", text_color=year_color, font=("Segoe UI", 14, "bold")).grid(row=row, column=4, sticky="ew", padx=12, pady=6)
 
         switcher.configure(command=render)
+        grade_menu.configure(command=render)
+        search_text.trace_add("write", render)
         render()
 
+    def close_score_trends(self) -> None:
+        """Return from the in-window trends page to the dashboard."""
+        if getattr(self, "trends_page", None) is not None:
+            self.trends_page.destroy()
+            self.trends_page = None
+        self.dashboard_header.grid()
+        self.dashboard_body.grid()
+
     def start_score_export(self) -> None:
+        saved_at, _records = self._update_history_status()
+        if saved_at is not None:
+            self._log("• Score history is already saved for this month; no duplicate Excel export was created.")
+            return
+
         def export() -> None:
             client, portfolio_id = self._client()
             companies: list[Company] = []
@@ -580,6 +713,7 @@ class Dashboard(ctk.CTk):
                 details = client.get_company(domain)
                 companies.append(Company(domain, item.get("name", domain), str(details.get("grade") or "").upper(), details.get("score")))
             appended = append_score_history(companies)
+            self.after(0, self._update_history_status)
             self._log(f"✓ Added {appended} score records to {SCORE_HISTORY_PATH}.")
         self._run("Updating score history", export)
 
