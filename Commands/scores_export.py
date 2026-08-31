@@ -4,20 +4,25 @@ import argparse
 import logging
 import sys
 from pathlib import Path
+
+PROJECT_DIR = Path(__file__).resolve().parents[1]
+if str(PROJECT_DIR) not in sys.path:
+    sys.path.insert(0, str(PROJECT_DIR))
+
 from models import Company
-from config import CONFIG_PATH, REPORTS_DIR, load_config, validate_ssc_config
-from Services.scores import display_scores, export_scores
+from config import CONFIG_PATH, load_config, validate_ssc_config
+from Services.scores import SCORE_HISTORY_PATH, append_score_history, display_scores
 from ssc_client import SecurityScorecardClient
 
 # -----------------------------------------------------------------------------
 # This file serves as the entry point for retrieving SecurityScorecard
-# company scores and exporting them to a JSON file.
+# company scores and appending them to the Excel history.
 # -----------------------------------------------------------------------------
 
 # Parse command-line arguments for the score export command.
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Display and export SecurityScorecard portfolio scores."
+        description="Display and append SecurityScorecard portfolio scores."
     )
 
     parser.add_argument(
@@ -28,10 +33,10 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
-        "--output",
+        "--history",
         type=Path,
-        default=REPORTS_DIR / "scores.json",
-        help="Output JSON file.",
+        default=SCORE_HISTORY_PATH,
+        help="Excel workbook that receives appended score history.",
     )
 
     return parser.parse_args()
@@ -75,17 +80,15 @@ def main() -> None:
                 )
             )
 
-        # Display the scores and export them to a JSON file.
+        # Display the scores and append them to the Excel history.
         display_scores(companies)
 
-        export_scores(
-            companies,
-            args.output,
-        )
+        appended = append_score_history(companies, args.history)
 
         logging.info(
-            "Scores exported to %s",
-            args.output,
+            "Appended %d score records to %s",
+            appended,
+            args.history,
         )
 
     # Exit gracefully if the operation is cancelled by the user.

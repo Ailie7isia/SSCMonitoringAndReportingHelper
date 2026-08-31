@@ -5,22 +5,135 @@ from __future__ import annotations
 # displays a summary, and exports the results to a JSON file.
 # -----------------------------------------------------------------------------
 
-from models import Company
 from collections import Counter
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from os import environ
 from pathlib import Path
-from config import load_config, validate_ssc_config
-from Services.portfolio import companies_from_payload
-from ssc_client import SecurityScorecardClient
-import json
 
-# Grade sort for displays.
-GRADE_ORDER = {
-    "A": 5,
-    "B": 4,
-    "C": 3,
-    "D": 2,
-    "F": 1,
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font, PatternFill
+
+from models import Company
+
+DEFAULT_SCORE_HISTORY_PATH = (
+    r"C:\Users\ailie\.cursor\projects\SSCMonitoringAndReportingHelper\SSC Helper Log.xlsx"
+)
+SCORE_HISTORY_PATH = Path(environ.get("SSC_SCORE_HISTORY_PATH", DEFAULT_SCORE_HISTORY_PATH))
+HISTORY_HEADERS = ["Retrieved (UTC)", "Domain", "Company", "Score", "Grade"]
+GRADE_FILLS = {
+    "A": "35C98A",
+    "B": "F1BE4D",
+    "C": "F48F4A",
+    "D": "EE5D69",
+    "F": "C93546",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class ScoreTrend:
+    """Current score movement compared with the closest prior observations."""
+
+    month_over_month: float | None
+    year_over_year: float | None
+
+
+def score_trends_for_companies(
+    companies: list[Company],
+    history_file: Path = SCORE_HISTORY_PATH,
+) -> dict[str, ScoreTrend]:
+    """Return 30-day and 365-day score changes for the active portfolio.
+
+    The history workbook is read once, which keeps the trends view responsive
+    even when the portfolio contains many domains.
+    """
+    current_scores = {
+        company.domain.lower(): float(company.score)
+        for company in companies
+        if company.score is not None
+    }
+    if not current_scores or not history_file.exists():
+        return {domain: ScoreTrend(None, None) for domain in current_scores}
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    cutoffs = {"month": now - timedelta(days=30), "year": now - timedelta(days=365)}
+    baselines: dict[str, dict[str, tuple[datetime, float] | None]] = {
+        domain: {period: None for period in cutoffs}
+        for domain in current_scores
+    }
+    try:
+        workbook = load_workbook(history_file, read_only=True, data_only=True)
+        worksheet = workbook.active
+        for timestamp, logged_domain, _name, score, _grade in worksheet.iter_rows(
+            min_row=1,
+            max_col=5,
+            values_only=True,
+        ):
+            domain = str(logged_domain).lower()
+            if domain not in baselines or not isinstance(timestamp, datetime):
+                continue
+            timestamp = timestamp.replace(tzinfo=None)
+            try:
+                numeric_score = float(score)
+            except (TypeError, ValueError):
+                continue
+            for period, cutoff in cutoffs.items():
+                baseline = baselines[domain][period]
+                if timestamp <= cutoff and (baseline is None or timestamp > baseline[0]):
+                    baselines[domain][period] = (timestamp, numeric_score)
+        workbook.close()
+    except (OSError, ValueError):
+        return {domain: ScoreTrend(None, None) for domain in current_scores}
+
+    return {
+        domain: ScoreTrend(
+            month_over_month=(
+                current_scores[domain] - baselines[domain]["month"][1]
+                if baselines[domain]["month"] is not None
+                else None
+            ),
+            year_over_year=(
+                current_scores[domain] - baselines[domain]["year"][1]
+                if baselines[domain]["year"] is not None
+                else None
+            ),
+        )
+        for domain in current_scores
+    }
+
+
+def score_change_over_past_month(
+    domain: str,
+    current_score: int | float | None,
+    history_file: Path = SCORE_HISTORY_PATH,
+) -> float | None:
+    """Compare ``current_score`` with the latest observation at least 30 days old."""
+    if current_score is None or not history_file.exists():
+        return None
+    try:
+        workbook = load_workbook(history_file, read_only=True, data_only=True)
+        worksheet = workbook.active
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=30)
+        baseline: tuple[datetime, float] | None = None
+        for timestamp, logged_domain, _name, score, _grade in worksheet.iter_rows(
+            min_row=1,
+            max_col=5,
+            values_only=True,
+        ):
+            if not isinstance(timestamp, datetime) or str(logged_domain).lower() != domain.lower():
+                continue
+            try:
+                numeric_score = float(score)
+            except (TypeError, ValueError):
+                continue
+            if timestamp <= cutoff and (baseline is None or timestamp > baseline[0]):
+                baseline = (timestamp, numeric_score)
+        workbook.close()
+    except (OSError, ValueError):
+        return None
+    if baseline is None:
+        return None
+    return float(current_score) - baseline[1]
 
 # Display the score for each company in the portfolio.
 def display_scores(companies: list[Company]) -> None:
@@ -32,35 +145,43 @@ def display_scores(companies: list[Company]) -> None:
             f"{company.domain}"
         )
 
-# Export company information and scores to a JSON file.
-def export_scores(
+def append_score_history(
     companies: list[Company],
-    output_file: Path,
-) -> None:
-    output_file.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    output_file: Path = SCORE_HISTORY_PATH,
+) -> int:
+    """Append one timestamped record per company without replacing history."""
+    if output_file.exists():
+        workbook = load_workbook(output_file)
+        worksheet = workbook.active
+    else:
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        workbook = Workbook()
+        worksheet = workbook.active
 
-    payload = [
-    {
-        "domain": company.domain,
-        "name": company.name,
-        "score": company.score,
-    }
-    for company in sorted(companies, key=lambda c: c.domain)
-    ]
+    if worksheet["A1"].value is None:
+        worksheet.merge_cells("A1:E1")
+        worksheet["A1"] = "SSC Monitoring Helper — Score History"
+        worksheet["A1"].font = Font(bold=True, size=16, color="FFFFFF")
+        worksheet["A1"].fill = PatternFill("solid", fgColor="14212D")
+        for column, header in enumerate(HISTORY_HEADERS, start=1):
+            cell = worksheet.cell(row=2, column=column, value=header)
+            cell.font = Font(bold=True, color="10202A")
+            cell.fill = PatternFill("solid", fgColor="2FBF8F")
+        worksheet.freeze_panes = "A3"
 
-    with output_file.open(
-        "w",
-        encoding="utf-8",
-    ) as f:
-        json.dump(
-            payload,
-            f,
-            indent=4,
-            ensure_ascii=False,
-        )
+    retrieved_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    for company in sorted(companies, key=lambda item: item.domain.lower()):
+        grade = (company.grade or "Unknown").upper()
+        worksheet.append([retrieved_at, company.domain, company.name, company.score, grade])
+        row = worksheet.max_row
+        worksheet.cell(row=row, column=1).number_format = "yyyy-mm-dd hh:mm:ss"
+        worksheet.cell(row=row, column=4).number_format = "0"
+        worksheet.cell(row=row, column=5).font = Font(bold=True)
+        if grade in GRADE_FILLS:
+            worksheet.cell(row=row, column=5).fill = PatternFill("solid", fgColor=GRADE_FILLS[grade])
+
+    workbook.save(output_file)
+    return len(companies)
 
 # Count the number of companies for each score/grade.
 def grade_statistics(
@@ -73,32 +194,6 @@ def grade_statistics(
     )
 
     return dict(counts)
-
-# Main workflow for retrieving, displaying, and exporting portfolio scores.
-def run_score_export(
-    *,
-    config_path: Path,
-    output: Path,
-) -> None:
-
-    config = load_config(config_path)
-
-    api_key, portfolio_id = validate_ssc_config(config)
-
-    client = SecurityScorecardClient(api_key)
-
-    companies = companies_from_payload(
-        client.fetch_portfolio_companies(portfolio_id)
-    )
-
-    display_scores(companies)
-
-    print_statistics(companies)
-
-    export_scores(
-        companies,
-        output,
-    )
 
 # Print a summary of the portfolio score distribution.
 def print_statistics(companies: list[Company]) -> None:

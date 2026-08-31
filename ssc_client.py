@@ -115,40 +115,23 @@ class SecurityScorecardClient:
         )
 
 
-    # Request SecurityScorecard to generate a report.
-    # Returns report information, including its ID.
-    def create_report(
-        self,
-        *,
-        domain: str,
-        report_type: str,
-        fmt: str = "pdf",
-    ) -> dict:
-
-        r = self._request(
+    def create_detailed_report(self, domain: str) -> dict:
+        """Request a new Company Detailed PDF report for ``domain``."""
+        response = self._request(
             "POST",
-            "/reports",
-            json={
-                "domain": domain,
-                "type": report_type,
-                "format": fmt,
-            },
+            "/reports/detailed",
+            json={"scorecard_identifier": domain},
         )
+        return response.json()
 
-        return r.json()
-
-    # Retrieve the current status/details of a report.
-    def get_report(
-        self,
-        report_id: str,
-    ) -> dict:
-
-        r = self._request(
-            "GET",
-            f"/reports/{report_id}",
+    def create_issues_report(self, domain: str) -> dict:
+        """Request a new Company Issues report in CSV format for ``domain``."""
+        response = self._request(
+            "POST",
+            "/reports/issues",
+            json={"scorecard_identifier": domain, "format": "csv"},
         )
-
-        return r.json()
+        return response.json()
 
     # Get the list of recently generated reports.
     def list_recent_reports(self) -> list[dict]:
@@ -181,8 +164,7 @@ class SecurityScorecardClient:
         domain: str,
     ) -> dict:
         r = self._request(
-        "GET",
-        f"/companies/{domain}",
-    )
-
-        return r.json()    
+            "GET",
+            f"/companies/{domain}",
+        )
+        return r.json()

@@ -79,6 +79,18 @@ Start the toolkit with:
 python main.py
 ```
 
+This opens the Windows **SSC Monitoring Helper** dashboard. It presents
+portfolio metrics, currently active domains with grade-colored scores, recent
+activity, and guided actions for portfolio cycles, report generation, and
+append-only Excel score history. Portfolio changes still require an explicit
+confirmation.
+
+For the original terminal menu, run:
+
+```bash
+python main.py --cli
+```
+
 You will be presented with a menu similar to:
 
 ```text
@@ -113,23 +125,25 @@ The process:
 
 ### 2. Download Reports
 
-Downloads PDF reports for every company currently in the portfolio.
+Generates and downloads fresh Detailed PDF and Issues CSV reports for every
+company currently in the portfolio.
 
 The application:
 
-* reuses recent reports when available,
-* generates new reports when necessary,
-* downloads reports concurrently,
-* saves reports into the configured output folder.
+* creates new report requests for the current batch,
+* never selects a previous month's report,
+* validates downloads and retries an invalid file once,
+* saves Detailed PDFs and Issues CSVs into separate date-stamped folders.
 
 ---
 
 ### 3. Export Scores
 
-Retrieves the latest company scores and exports them to:
+Retrieves the latest company scores and appends a timestamped record for every
+company to the configured Excel score-history workbook.
 
 ```text
-reports/scores.json
+SSC Helper Log.xlsx
 ```
 
 Each exported record contains:
@@ -138,6 +152,10 @@ Each exported record contains:
 * Domain
 * SecurityScorecard grade
 * SecurityScorecard score
+
+To use a different workbook on another computer, set the
+`SSC_SCORE_HISTORY_PATH` environment variable to its full `.xlsx` path before
+starting the app.
 
 ---
 

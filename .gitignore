@@ -19,3 +19,6 @@ venv/
 .vscode/
 
 constants.py
+
+# Generated operational artifacts (may contain customer security information)
+reports/

@@ -17,9 +17,6 @@ import re
 _INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1F]')
 _MULTIPLE_SPACES = re.compile(r"\s+")
 
-from pathlib import Path
-from typing import Iterable
-
 # Normalize grade by capitaling string.
 def normalize_grade(value: object) -> str:
     return str(value or "").strip().upper()
@@ -50,6 +47,8 @@ def make_filename(
     company_name: str,
     month: str,
     report_type: str,
+    *,
+    extension: str = ".pdf",
 ) -> str:
 
     # Convert API report type for easier reading.
@@ -63,7 +62,7 @@ def make_filename(
 
     return (
         f"[{grade}] - {safe_name} - "
-        f"{report_name} - {month}.pdf"
+        f"{report_name} - {month}{extension}"
     )
 
 # Validate the SecurityScorecard configuration before making API calls.
