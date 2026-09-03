@@ -41,6 +41,38 @@ ctk.set_default_color_theme("green")
 BACKGROUND, PANEL, PANEL_ALT = "#101923", "#182532", "#213240"
 ACCENT, MUTED = "#2FBF8F", "#9CB2C2"
 GRADE_COLORS = {"A": "#35C98A", "B": "#F1BE4D", "C": "#F48F4A", "D": "#EE5D69", "F": "#C93546"}
+HEATMAP_COLORS = {
+    "A": ("#235C45", "#E6FFF4"),
+    "B": ("#285787", "#E8F3FF"),
+    "C": ("#80601C", "#FFF8DF"),
+    "D": ("#854A25", "#FFF0E8"),
+    "F": ("#842E3B", "#FFECEF"),
+    "unknown": (PANEL_ALT, MUTED),
+}
+FACTOR_ORDER = (
+    "Application Security",
+    "Cubit Score",
+    "DNS Health",
+    "Endpoint Security",
+    "Hacker Chatter",
+    "IP Reputation",
+    "Information Leak",
+    "Network Security",
+    "Patching Cadence",
+    "Social Engineering",
+)
+FACTOR_SHORT_NAMES = {
+    "Application Security": "App Sec",
+    "Cubit Score": "Cubit",
+    "DNS Health": "DNS",
+    "Endpoint Security": "Endpoint",
+    "Hacker Chatter": "Chatter",
+    "IP Reputation": "IP Rep",
+    "Information Leak": "Info Leak",
+    "Network Security": "Network",
+    "Patching Cadence": "Patching",
+    "Social Engineering": "Social Eng",
+}
 
 
 class QueueLogHandler(logging.Handler):
@@ -62,6 +94,9 @@ class Dashboard(ctk.CTk):
         self.log_queue: "queue.Queue[str]" = queue.Queue()
         self.busy = False
         self.current_companies: list[Company] = []
+        self.active_cycle: int | None = None
+        self.trends_page: ctk.CTkFrame | None = None
+        self.report_page: ctk.CTkFrame | None = None
         self._build_layout()
         self._build_loading_overlay()
         self.after(150, self._poll_log_queue)
@@ -75,13 +110,7 @@ class Dashboard(ctk.CTk):
         sidebar.grid_propagate(False)
         ctk.CTkLabel(sidebar, text="SSC", font=("Segoe UI", 29, "bold"), text_color=ACCENT).pack(anchor="w", padx=27, pady=(31, 0))
         ctk.CTkLabel(sidebar, text="MONITORING HELPER", font=("Segoe UI", 14, "bold"), text_color=MUTED).pack(anchor="w", padx=29, pady=(0, 37))
-        self.operation_buttons: list[ctk.CTkButton] = []
-        self._side_button(sidebar, "↻   Refresh portfolio", self.refresh_dashboard)
-        self._side_button(sidebar, "◈   Run portfolio cycle", self.open_cycle_dialog)
-        self._side_button(sidebar, "↓   Download detailed reports", self.start_detailed_reports_download)
-        self._side_button(sidebar, "↓   Download issue reports", self.start_issue_reports_download)
-        self._side_button(sidebar, "▣   Open reports folder", self.open_reports_folder)
-        self._side_button(sidebar, "↑   Update score history", self.start_score_export)
+        self.navigation_buttons: list[ctk.CTkButton] = []
         self.history_status = ctk.CTkLabel(
             sidebar,
             text="Checking score history…",
@@ -89,18 +118,25 @@ class Dashboard(ctk.CTk):
             font=("Segoe UI", 14),
             text_color=MUTED,
         )
-        self.history_status.pack(anchor="w", padx=29, pady=(6, 0))
+        self.history_status.pack(anchor="w", padx=24, pady=(6, 0))
         self._update_history_status()
-        self._side_button(sidebar, "↗   View score trends", self.open_score_trends)
-        ctk.CTkLabel(sidebar, text="SECURE WORKFLOW", font=("Segoe UI", 14, "bold"), text_color=MUTED).pack(anchor="w", padx=29, pady=(35, 8))
-        ctk.CTkLabel(sidebar, text="Portfolio changes always\nrequire confirmation.", justify="left", font=("Segoe UI", 14), text_color="#C8D5DD").pack(anchor="w", padx=29)
-        self.sidebar_status = ctk.CTkLabel(sidebar, text="●  Ready", font=("Segoe UI", 14, "bold"), text_color=ACCENT)
-        self.sidebar_status.pack(side="bottom", anchor="w", padx=29, pady=28)
+        self._side_button(sidebar, "▣   Dashboard", self.show_dashboard)
+        self._side_button(sidebar, "↗   Scores Trend", self.open_score_trends)
+        self._side_button(sidebar, "▤   Report", self.open_report_page)
+        self.sidebar_status = ctk.CTkLabel(
+            sidebar,
+            text="●  Ready",
+            justify="left",
+            wraplength=190,
+            font=("Segoe UI", 12, "bold"),
+            text_color=ACCENT,
+        )
+        self.sidebar_status.pack(side="bottom", anchor="w", fill="x", padx=24, pady=22)
 
         self.dashboard_header = ctk.CTkFrame(self, height=112, corner_radius=0, fg_color=BACKGROUND)
         self.dashboard_header.grid(row=0, column=1, sticky="new", padx=35)
         self.dashboard_header.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(self.dashboard_header, text="SSC Monitoring Helper", font=("Segoe UI", 29, "bold")).grid(row=0, column=0, sticky="sw", pady=(25, 0))
+        ctk.CTkLabel(self.dashboard_header, text="Dashboard", font=("Segoe UI", 29, "bold")).grid(row=0, column=0, sticky="sw", pady=(25, 0))
         self.last_updated = ctk.CTkLabel(self.dashboard_header, text="Loading portfolio data…", font=("Segoe UI", 14), text_color=MUTED)
         self.last_updated.grid(row=1, column=0, sticky="nw", pady=(2, 0))
         self.refresh_button = ctk.CTkButton(self.dashboard_header, text="Refresh now", width=125, height=34, command=self.refresh_dashboard, fg_color=PANEL_ALT, hover_color="#2C4354", font=("Segoe UI", 14))
@@ -115,7 +151,7 @@ class Dashboard(ctk.CTk):
         for index, (key, title, value, subtitle, color) in enumerate((
             ("companies", "Active domains", "—", "Current portfolio", ACCENT),
             ("kalbe", "Kalbe.co.id score", "—", "No 30-day comparison yet", "#6BAFFF"),
-            ("attention", "Needs attention", "—", "Grade C or below", "#F2B84B"),
+            ("attention", "Needs attention", "—", "Grade B and below", "#F2B84B"),
         )):
             card = self._metric_card(body, title, value, subtitle, color)
             card.grid(row=0, column=index, sticky="ew", padx=7, pady=(5, 14))
@@ -125,8 +161,14 @@ class Dashboard(ctk.CTk):
         domains = ctk.CTkFrame(body, fg_color=PANEL, corner_radius=14)
         domains.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=7, pady=7)
         domains.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(domains, text="Currently active domains", font=("Segoe UI", 17, "bold")).grid(row=0, column=0, sticky="w", padx=20, pady=(17, 1))
-        ctk.CTkLabel(domains, text="Live scores are color-coded by company grade", font=("Segoe UI", 14), text_color=MUTED).grid(row=1, column=0, sticky="w", padx=20)
+        ctk.CTkLabel(domains, text="Active Domains", font=("Segoe UI", 17, "bold")).grid(row=0, column=0, sticky="w", padx=20, pady=(17, 1))
+        self.cycle_context = ctk.CTkLabel(
+            domains,
+            text="Currently viewing active portfolio",
+            font=("Segoe UI", 14),
+            text_color=MUTED,
+        )
+        self.cycle_context.grid(row=1, column=0, sticky="w", padx=20)
         self.copy_domains_button = ctk.CTkButton(
             domains,
             text="Copy all",
@@ -140,17 +182,18 @@ class Dashboard(ctk.CTk):
         )
         self.copy_domains_button.grid(row=0, column=1, rowspan=2, sticky="e", padx=20, pady=(12, 0))
         self.domain_rows = ctk.CTkScrollableFrame(domains, height=245, fg_color="#0E1821", corner_radius=9)
-        self.domain_rows.grid(row=2, column=0, sticky="ew", padx=20, pady=(12, 20))
+        self.domain_rows.grid(row=2, column=0, columnspan=2, sticky="ew", padx=20, pady=(12, 20))
         self.domain_rows.grid_columnconfigure(0, weight=1)
         self._render_domains([])
 
         actions = ctk.CTkFrame(body, fg_color=PANEL, corner_radius=14)
         actions.grid(row=1, column=2, sticky="nsew", padx=7, pady=7)
-        ctk.CTkLabel(actions, text="Recommended next step", font=("Segoe UI", 17, "bold")).pack(anchor="w", padx=20, pady=(18, 5))
-        self.recommendation = ctk.CTkLabel(actions, text="Load the portfolio to see a tailored recommendation.", justify="left", wraplength=240, font=("Segoe UI", 14), text_color="#D5E0E6")
-        self.recommendation.pack(anchor="w", padx=20, pady=(0, 17))
-        self.action_button = ctk.CTkButton(actions, text="Run portfolio cycle", command=self.open_cycle_dialog, fg_color=ACCENT, hover_color="#249E74", font=("Segoe UI", 14))
-        self.action_button.pack(fill="x", padx=20, pady=(0, 19))
+        self.action_buttons: list[ctk.CTkButton] = []
+        self._action_button(actions, "◈   Run portfolio cycle", self.open_cycle_dialog, primary=True)
+        self._action_button(actions, "↓   Download detailed reports", self.start_detailed_reports_download)
+        self._action_button(actions, "↓   Download issue reports", self.start_issue_reports_download)
+        self._action_button(actions, "▣   Open reports folder", self.open_reports_folder)
+        self._action_button(actions, "↑   Update score history", self.start_score_export)
 
         activity = ctk.CTkFrame(body, fg_color=PANEL, corner_radius=14)
         activity.grid(row=2, column=0, columnspan=3, sticky="nsew", padx=7, pady=(15, 8))
@@ -178,7 +221,29 @@ class Dashboard(ctk.CTk):
     def _side_button(self, parent: ctk.CTkFrame, text: str, command: Callable[[], None]) -> None:
         button = ctk.CTkButton(parent, text=text, command=command, anchor="w", height=43, corner_radius=8, fg_color="transparent", hover_color=PANEL_ALT, font=("Segoe UI", 14))
         button.pack(fill="x", padx=17, pady=(3, 0))
-        self.operation_buttons.append(button)
+        self.navigation_buttons.append(button)
+
+    def _action_button(
+        self,
+        parent: ctk.CTkFrame,
+        text: str,
+        command: Callable[[], None],
+        *,
+        primary: bool = False,
+    ) -> None:
+        button = ctk.CTkButton(
+            parent,
+            text=text,
+            command=command,
+            anchor="w",
+            height=40,
+            corner_radius=8,
+            fg_color=ACCENT if primary else PANEL_ALT,
+            hover_color="#249E74" if primary else "#2C4354",
+            font=("Segoe UI", 14),
+        )
+        button.pack(fill="x", padx=20, pady=(18, 0) if primary else (8, 0))
+        self.action_buttons.append(button)
 
     @staticmethod
     def _metric_card(parent: ctk.CTkFrame, title: str, value: str, subtitle: str, color: str) -> ctk.CTkFrame:
@@ -201,10 +266,11 @@ class Dashboard(ctk.CTk):
     ) -> None:
         self.busy = busy
         state = "disabled" if busy else "normal"
-        for button in self.operation_buttons:
+        for button in self.navigation_buttons:
             button.configure(state=state)
         self.refresh_button.configure(state=state)
-        self.action_button.configure(state=state)
+        for button in self.action_buttons:
+            button.configure(state=state)
         self.sidebar_status.configure(text=f"{'◌' if busy else '●'}  {status}", text_color="#F2B84B" if busy else ACCENT)
         if busy and show_loading_overlay:
             self.loading_title.configure(text=status)
@@ -296,8 +362,9 @@ class Dashboard(ctk.CTk):
         kalbe_trend: float | None,
     ) -> None:
         self.current_companies = companies
+        self.cycle_context.configure(text=f"Currently viewing {self._current_cycle_label(companies)}")
         grades = grade_statistics(companies)
-        attention = sum(grades.get(grade, 0) for grade in ("C", "D", "F"))
+        attention = sum(grades.get(grade, 0) for grade in ("B", "C", "D", "F"))
         kalbe = next((company for company in companies if company.domain.lower() == "kalbe.co.id"), None)
         self.metric_values["companies"].configure(text=str(len(companies)))
         if kalbe and isinstance(kalbe.score, (int, float)):
@@ -313,12 +380,17 @@ class Dashboard(ctk.CTk):
         self.metric_values["attention"].configure(text=str(attention))
         self.last_updated.configure(text=f"Last refreshed {datetime.now().strftime('%d %b %Y, %H:%M')}  •  {len(companies)} domains active")
         self._render_domains(companies)
-        if attention:
-            self.recommendation.configure(text=f"{attention} monitored compan{'y needs' if attention == 1 else 'ies need'} attention. Export the score data to support follow-up.")
-            self.action_button.configure(text="Update score history", command=self.start_score_export)
-        else:
-            self.recommendation.configure(text="No C, D, or F grades currently detected. Review the next portfolio cycle when scheduled.")
-            self.action_button.configure(text="Run portfolio cycle", command=self.open_cycle_dialog)
+
+    def _current_cycle_label(self, companies: list[Company]) -> str:
+        """Return the configured cycle name when the portfolio matches one."""
+        current_domains = {company.domain.lower() for company in companies}
+        for option in sorted(OPTION_VENDORS):
+            if current_domains == {domain.lower() for domain in target_domains(option)}:
+                self.active_cycle = option
+                break
+        if self.active_cycle is None:
+            return "active portfolio"
+        return f"Cycle {self.active_cycle} — {OPTION_LABELS[self.active_cycle]}"
 
     def _set_kalbe_trend(self, trend: float | None) -> None:
         if trend is None:
@@ -410,6 +482,7 @@ class Dashboard(ctk.CTk):
                 self._log("• Portfolio cycle cancelled; no changes were made.")
                 return
             report = apply_plan(client, portfolio_id, plan)
+            self.active_cycle = option
             self._log(f"✓ Portfolio cycle complete: {len(report.added_ok)} added, {len(report.removed_ok)} removed, {len(report.added_failed) + len(report.removed_failed)} failed.")
             # Let the current task release the UI first, then reload the
             # management metrics from the updated portfolio.
@@ -577,7 +650,10 @@ class Dashboard(ctk.CTk):
 
     def _show_score_trends(self, history_trends: dict[str, object]) -> None:
         """Display the loaded score history in the trend page."""
-        if getattr(self, "trends_page", None) is not None:
+        if self.report_page is not None:
+            self.report_page.destroy()
+            self.report_page = None
+        if self.trends_page is not None:
             self.trends_page.destroy()
         self.dashboard_header.grid_remove()
         self.dashboard_body.grid_remove()
@@ -589,10 +665,10 @@ class Dashboard(ctk.CTk):
         # the available vertical space instead of leaving a large gap above it.
         self.trends_page.grid_rowconfigure(3, weight=1, minsize=540)
         ctk.CTkButton(
-            self.trends_page, text="←  Back to dashboard", command=self.close_score_trends,
+            self.trends_page, text="←  Dashboard", command=self.close_score_trends,
             width=170, height=32, fg_color="transparent", hover_color=PANEL_ALT, anchor="w", font=("Segoe UI", 14),
         ).grid(row=0, column=0, sticky="w", padx=4, pady=(22, 0))
-        ctk.CTkLabel(self.trends_page, text="Score trends", font=("Segoe UI", 25, "bold")).grid(
+        ctk.CTkLabel(self.trends_page, text="Scores Trend", font=("Segoe UI", 25, "bold")).grid(
             row=1, column=0, sticky="w", padx=4, pady=(13, 0)
         )
         ctk.CTkLabel(
@@ -727,13 +803,184 @@ class Dashboard(ctk.CTk):
         search_text.trace_add("write", render)
         render()
 
-    def close_score_trends(self) -> None:
-        """Return from the in-window trends page to the dashboard."""
-        if getattr(self, "trends_page", None) is not None:
+    @staticmethod
+    def _grade_for_score(score: float) -> str:
+        if score >= 90:
+            return "A"
+        if score >= 80:
+            return "B"
+        if score >= 70:
+            return "C"
+        if score >= 60:
+            return "D"
+        return "F"
+
+    def _factor_heatmap_from_reports(
+        self,
+    ) -> tuple[list[str], dict[str, dict[str, float | None]], int]:
+        """Estimate factor exposure from the newest local Issues report per domain.
+
+        SecurityScorecard's CSV records issue-level score impact, not the
+        official factor score. Starting at 100 and applying those impacts makes
+        the local data scannable while keeping the distinction visible in UI.
+        """
+        factors = list(FACTOR_ORDER)
+        matrix: dict[str, dict[str, float | None]] = {
+            company.domain: {factor: None for factor in factors}
+            for company in self.current_companies
+        }
+        reports_found = 0
+        for company in self.current_companies:
+            issue_report = self._latest_issue_report(company)
+            if issue_report is None:
+                continue
+            reports_found += 1
+            scores: dict[str, float | None] = {factor: 100.0 for factor in factors}
+            try:
+                with open(issue_report, "r", encoding="utf-8-sig", newline="") as file:
+                    for issue in csv.DictReader(file):
+                        factor = (issue.get("FACTOR NAME") or "").strip()
+                        if not factor:
+                            continue
+                        if factor not in scores:
+                            factors.append(factor)
+                            scores[factor] = 100.0
+                        raw_impact = (issue.get("ISSUE TYPE SCORE IMPACT") or "").replace("<", "").strip()
+                        try:
+                            impact = float(raw_impact) if raw_impact else 0.0
+                        except ValueError:
+                            impact = 0.0
+                        scores[factor] = max(0.0, min(100.0, (scores[factor] or 100.0) + impact))
+            except (OSError, csv.Error):
+                continue
+            matrix[company.domain] = scores
+        for domain, scores in matrix.items():
+            for factor in factors:
+                scores.setdefault(factor, None)
+        return factors, matrix, reports_found
+
+    def open_report_page(self) -> None:
+        """Build the Report view from the latest downloaded issue reports."""
+        if self.busy:
+            return
+        if not self.current_companies:
+            self._log("• Refresh the portfolio before opening the report.")
+            return
+
+        def build_report() -> None:
+            factors, matrix, reports_found = self._factor_heatmap_from_reports()
+            self.after(0, lambda: self._show_report_page(factors, matrix, reports_found))
+            self._log(
+                f"✓ Report heatmap prepared from {reports_found} latest Issues report(s)."
+            )
+
+        self._run("Building report heatmap", build_report, show_loading_overlay=False)
+
+    def _show_report_page(
+        self,
+        factors: list[str],
+        matrix: dict[str, dict[str, float | None]],
+        reports_found: int,
+    ) -> None:
+        """Render the executive-style factor-by-domain heatmap."""
+        if self.trends_page is not None:
             self.trends_page.destroy()
             self.trends_page = None
+        if self.report_page is not None:
+            self.report_page.destroy()
+        self.dashboard_header.grid_remove()
+        self.dashboard_body.grid_remove()
+
+        self.report_page = ctk.CTkFrame(self, fg_color=BACKGROUND, corner_radius=0)
+        self.report_page.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(31, 23), pady=(0, 20))
+        self.report_page.grid_columnconfigure(0, weight=1)
+        self.report_page.grid_rowconfigure(3, weight=1)
+        ctk.CTkButton(
+            self.report_page, text="←  Dashboard", command=self.show_dashboard,
+            width=170, height=32, fg_color="transparent", hover_color=PANEL_ALT,
+            anchor="w", font=("Segoe UI", 14),
+        ).grid(row=0, column=0, sticky="w", padx=4, pady=(22, 0))
+        ctk.CTkLabel(self.report_page, text="Report", font=("Segoe UI", 25, "bold")).grid(
+            row=1, column=0, sticky="w", padx=4, pady=(13, 0)
+        )
+        ctk.CTkLabel(
+            self.report_page,
+            text=(
+                "Factor exposure heatmap • newest downloaded Issues report per domain • "
+                f"{reports_found} of {len(self.current_companies)} active domains covered"
+            ),
+            font=("Segoe UI", 13), text_color=MUTED,
+        ).grid(row=2, column=0, sticky="w", padx=4, pady=(2, 12))
+
+        content = ctk.CTkFrame(self.report_page, fg_color=PANEL, corner_radius=14)
+        content.grid(row=3, column=0, sticky="nsew", padx=4, pady=(0, 8))
+        content.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            content,
+            text="Factor exposure by domain",
+            font=("Segoe UI", 17, "bold"),
+        ).grid(row=0, column=0, sticky="w", padx=20, pady=(17, 1))
+        ctk.CTkLabel(
+            content,
+            text="Estimated from Issue Report score impacts. 100 means no recorded score impact; — means no downloaded report.",
+            font=("Segoe UI", 12), text_color=MUTED,
+        ).grid(row=1, column=0, sticky="w", padx=20)
+        legend = ctk.CTkFrame(content, fg_color="transparent")
+        legend.grid(row=2, column=0, sticky="w", padx=20, pady=(10, 8))
+        for index, grade in enumerate(("A", "B", "C", "D", "F")):
+            background, foreground = HEATMAP_COLORS[grade]
+            ctk.CTkLabel(
+                legend, text=f" {grade}  { {'A': '90–100', 'B': '80–89', 'C': '70–79', 'D': '60–69', 'F': '<60'}[grade]} ",
+                fg_color=background, text_color=foreground, corner_radius=7,
+                font=("Segoe UI", 11, "bold"),
+            ).grid(row=0, column=index, padx=(0, 6))
+
+        table = ctk.CTkScrollableFrame(content, fg_color="#0E1821", corner_radius=9)
+        table.grid(row=3, column=0, sticky="nsew", padx=20, pady=(0, 20))
+        content.grid_rowconfigure(3, weight=1)
+        table.grid_columnconfigure(0, minsize=175, weight=1)
+        ctk.CTkLabel(
+            table, text="DOMAIN", anchor="w", font=("Segoe UI", 11, "bold"), text_color=MUTED,
+        ).grid(row=0, column=0, sticky="ew", padx=(9, 4), pady=(10, 6))
+        for column, factor in enumerate(factors, start=1):
+            table.grid_columnconfigure(column, minsize=58)
+            ctk.CTkLabel(
+                table, text=FACTOR_SHORT_NAMES.get(factor, factor), width=58,
+                wraplength=54, justify="center", font=("Segoe UI", 10, "bold"), text_color=MUTED,
+            ).grid(row=0, column=column, padx=2, pady=(8, 6))
+        for row, company in enumerate(sorted(self.current_companies, key=lambda item: item.domain.lower()), start=1):
+            company_score = "—" if company.score is None else f"{company.score:.0f}"
+            ctk.CTkLabel(
+                table, text=f"{company.domain}\n{company_score}  •  Grade {company.grade or '—'}",
+                anchor="w", justify="left", font=("Segoe UI", 12, "bold"), text_color="#D5E0E6",
+            ).grid(row=row, column=0, sticky="ew", padx=(9, 4), pady=3)
+            for column, factor in enumerate(factors, start=1):
+                score = matrix.get(company.domain, {}).get(factor)
+                if score is None:
+                    background, foreground = HEATMAP_COLORS["unknown"]
+                    text = "—"
+                else:
+                    background, foreground = HEATMAP_COLORS[self._grade_for_score(score)]
+                    text = f"{score:.0f}"
+                ctk.CTkLabel(
+                    table, text=text, width=58, height=36, corner_radius=7,
+                    fg_color=background, text_color=foreground, font=("Segoe UI", 12, "bold"),
+                ).grid(row=row, column=column, padx=2, pady=3)
+
+    def show_dashboard(self) -> None:
+        """Return from an in-window page to the main dashboard."""
+        if self.trends_page is not None:
+            self.trends_page.destroy()
+            self.trends_page = None
+        if self.report_page is not None:
+            self.report_page.destroy()
+            self.report_page = None
         self.dashboard_header.grid()
         self.dashboard_body.grid()
+
+    def close_score_trends(self) -> None:
+        """Compatibility alias for the score-trend back control."""
+        self.show_dashboard()
 
     def start_score_export(self) -> None:
         if self.busy:
