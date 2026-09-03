@@ -73,7 +73,8 @@ class Dashboard(ctk.CTk):
         self.operation_buttons: list[ctk.CTkButton] = []
         self._side_button(sidebar, "↻   Refresh portfolio", self.refresh_dashboard)
         self._side_button(sidebar, "◈   Run portfolio cycle", self.open_cycle_dialog)
-        self._side_button(sidebar, "↓   Generate & download reports", self.start_reports_download)
+        self._side_button(sidebar, "↓   Download detailed reports", self.start_detailed_reports_download)
+        self._side_button(sidebar, "↓   Download issue reports", self.start_issue_reports_download)
         self._side_button(sidebar, "▣   Open reports folder", self.open_reports_folder)
         self._side_button(sidebar, "↑   Update score history", self.start_score_export)
         self.history_status = ctk.CTkLabel(
@@ -200,16 +201,16 @@ class Dashboard(ctk.CTk):
         self.log_queue.put(text)
 
     def _update_history_status(self) -> tuple[datetime | None, int]:
-        """Show whether this month's score snapshot is already in Excel."""
+        """Show whether any cycle's score snapshot is already in Excel."""
         saved_at, records = current_month_history_status()
         if saved_at is None:
             self.history_status.configure(
-                text="○  This month not saved\nto score history",
+                text="○  Select a cycle to save\nthis month's score history",
                 text_color="#F2B84B",
             )
         else:
             self.history_status.configure(
-                text=f"✓  History saved this month\n{saved_at:%d %b %Y, %H:%M} • {records} records",
+                text=f"✓  Cycle history saved this month\n{saved_at:%d %b %Y, %H:%M} • {records} records",
                 text_color=ACCENT,
             )
         return saved_at, records
@@ -410,7 +411,13 @@ class Dashboard(ctk.CTk):
         completed.wait()
         return answer["value"]
 
-    def start_reports_download(self) -> None:
+    def start_detailed_reports_download(self) -> None:
+        self._start_reports_download("detailed_report", "Detailed PDF reports")
+
+    def start_issue_reports_download(self) -> None:
+        self._start_reports_download("issue_report", "Issues CSV reports")
+
+    def _start_reports_download(self, report_type: str, report_label: str) -> None:
         def download() -> None:
             client, portfolio_id = self._client()
             companies = companies_from_payload(client.fetch_portfolio_companies(portfolio_id))
@@ -418,12 +425,12 @@ class Dashboard(ctk.CTk):
                 self._log("• Portfolio is empty; no reports were downloaded.")
                 return
             output_dir = REPORTS_DIR / datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            saved = download_reports(client, companies, output_dir)
-            self._log(f"✓ Downloaded {len(saved)} of {len(companies) * 2} newly generated reports to {output_dir}.")
+            saved = download_reports(client, companies, output_dir, (report_type,))
+            self._log(f"✓ Downloaded {len(saved)} of {len(companies)} {report_label} to {output_dir}.")
         # Report generation can take a while. The service logs each request,
         # wait cycle, and saved file, so keep the Activity panel exposed.
         self._run(
-            "Generating and downloading reports",
+            f"Generating and downloading {report_label.lower()}",
             download,
             show_loading_overlay=False,
         )
@@ -698,9 +705,44 @@ class Dashboard(ctk.CTk):
         self.dashboard_body.grid()
 
     def start_score_export(self) -> None:
-        saved_at, _records = self._update_history_status()
+        if self.busy:
+            return
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Update score history")
+        dialog.geometry("470x610")
+        dialog.resizable(False, False)
+        dialog.grab_set()
+        ctk.CTkLabel(dialog, text="Choose a portfolio cycle", font=("Segoe UI", 22, "bold")).pack(anchor="w", padx=28, pady=(28, 3))
+        ctk.CTkLabel(
+            dialog,
+            text="Each cycle can be added to the score-history workbook once per calendar month.",
+            justify="left",
+            wraplength=390,
+            font=("Segoe UI", 14),
+            text_color=MUTED,
+        ).pack(anchor="w", padx=28, pady=(0, 18))
+        cycle_options = sorted(OPTION_VENDORS)
+        selected = ctk.IntVar(value=cycle_options[0])
+        for option in cycle_options:
+            cycle_name = OPTION_LABELS.get(option, f"Cycle {option}")
+            ctk.CTkRadioButton(
+                dialog,
+                text=f"Cycle {option} — {cycle_name}",
+                variable=selected,
+                value=option,
+                font=("Segoe UI", 14),
+            ).pack(anchor="w", padx=31, pady=6)
+
+        def update_history() -> None:
+            dialog.destroy()
+            self._export_score_history(selected.get())
+
+        ctk.CTkButton(dialog, text="Update score history", command=update_history, height=40, fg_color=ACCENT, hover_color="#249E74", font=("Segoe UI", 14)).pack(fill="x", padx=28, pady=27)
+
+    def _export_score_history(self, cycle: int) -> None:
+        saved_at, _records = current_month_history_status(cycle=cycle)
         if saved_at is not None:
-            self._log("• Score history is already saved for this month; no duplicate Excel export was created.")
+            self._log(f"• Cycle {cycle} score history is already saved for this month; no duplicate Excel export was created.")
             return
 
         def export() -> None:
@@ -712,10 +754,10 @@ class Dashboard(ctk.CTk):
                     continue
                 details = client.get_company(domain)
                 companies.append(Company(domain, item.get("name", domain), str(details.get("grade") or "").upper(), details.get("score")))
-            appended = append_score_history(companies)
+            appended = append_score_history(companies, cycle)
             self.after(0, self._update_history_status)
-            self._log(f"✓ Added {appended} score records to {SCORE_HISTORY_PATH}.")
-        self._run("Updating score history", export)
+            self._log(f"✓ Added {appended} Cycle {cycle} score records to {SCORE_HISTORY_PATH}.")
+        self._run(f"Updating Cycle {cycle} score history", export)
 
 
 def main() -> None:

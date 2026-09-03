@@ -20,7 +20,7 @@ DEFAULT_SCORE_HISTORY_PATH = (
     r"C:\Users\ailie\.cursor\projects\SSCMonitoringAndReportingHelper\SSC Helper Log.xlsx"
 )
 SCORE_HISTORY_PATH = Path(environ.get("SSC_SCORE_HISTORY_PATH", DEFAULT_SCORE_HISTORY_PATH))
-HISTORY_HEADERS = ["Retrieved (UTC)", "Domain", "Company", "Score", "Grade"]
+HISTORY_HEADERS = ["Retrieved (UTC)", "Domain", "Company", "Score", "Grade", "Cycle"]
 GRADE_FILLS = {
     "A": "35C98A",
     "B": "F1BE4D",
@@ -225,9 +225,16 @@ def display_scores(companies: list[Company]) -> None:
 
 def append_score_history(
     companies: list[Company],
+    cycle: int,
     output_file: Path = SCORE_HISTORY_PATH,
 ) -> int:
-    """Append one timestamped record per company without replacing history."""
+    """Append one timestamped record per company for a cycle's monthly snapshot."""
+    saved_at, _records = current_month_history_status(output_file, cycle)
+    if saved_at is not None:
+        raise ValueError(
+            f"Cycle {cycle} score history was already updated this month "
+            f"({saved_at:%d %b %Y, %H:%M} UTC)."
+        )
     if output_file.exists():
         workbook = load_workbook(output_file)
         worksheet = workbook.active
@@ -237,7 +244,7 @@ def append_score_history(
         worksheet = workbook.active
 
     if worksheet["A1"].value is None:
-        worksheet.merge_cells("A1:E1")
+        worksheet.merge_cells("A1:F1")
         worksheet["A1"] = "SSC Monitoring Helper — Score History"
         worksheet["A1"].font = Font(bold=True, size=16, color="FFFFFF")
         worksheet["A1"].fill = PatternFill("solid", fgColor="14212D")
@@ -246,11 +253,19 @@ def append_score_history(
             cell.font = Font(bold=True, color="10202A")
             cell.fill = PatternFill("solid", fgColor="2FBF8F")
         worksheet.freeze_panes = "A3"
+    elif worksheet["F2"].value is None:
+        # Upgrade workbooks created before cycle-specific snapshots were added.
+        if "A1:E1" in {str(cell_range) for cell_range in worksheet.merged_cells.ranges}:
+            worksheet.unmerge_cells("A1:E1")
+            worksheet.merge_cells("A1:F1")
+        worksheet["F2"] = "Cycle"
+        worksheet["F2"].font = Font(bold=True, color="10202A")
+        worksheet["F2"].fill = PatternFill("solid", fgColor="2FBF8F")
 
     retrieved_at = datetime.now(timezone.utc).replace(tzinfo=None)
     for company in sorted(companies, key=lambda item: item.domain.lower()):
         grade = (company.grade or "Unknown").upper()
-        worksheet.append([retrieved_at, company.domain, company.name, company.score, grade])
+        worksheet.append([retrieved_at, company.domain, company.name, company.score, grade, cycle])
         row = worksheet.max_row
         worksheet.cell(row=row, column=1).number_format = "yyyy-mm-dd hh:mm:ss"
         worksheet.cell(row=row, column=4).number_format = "0"
@@ -264,6 +279,7 @@ def append_score_history(
 
 def current_month_history_status(
     history_file: Path = SCORE_HISTORY_PATH,
+    cycle: int | None = None,
 ) -> tuple[datetime | None, int]:
     """Return the newest current-month export timestamp and its record count.
 
@@ -280,7 +296,10 @@ def current_month_history_status(
     try:
         workbook = load_workbook(history_file, read_only=True, data_only=True)
         worksheet = workbook.active
-        for (timestamp,) in worksheet.iter_rows(min_row=3, max_col=1, values_only=True):
+        for row in worksheet.iter_rows(min_row=3, max_col=6, values_only=True):
+            timestamp, logged_cycle = row[0], row[5]
+            if cycle is not None and logged_cycle != cycle:
+                continue
             if isinstance(timestamp, datetime) and month_start <= timestamp.replace(tzinfo=None) <= now:
                 count += 1
                 timestamp = timestamp.replace(tzinfo=None)

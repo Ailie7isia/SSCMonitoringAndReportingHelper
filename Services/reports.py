@@ -17,6 +17,7 @@ from utils import make_filename
 # Keep report requests polite to the API while avoiding one slow domain holding
 # up every other report in the portfolio.
 REQUEST_WORKERS = 2
+REPORT_TYPES = ("detailed_report", "issue_report")
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,8 +50,9 @@ def _request_single(
 def _request_new_reports(
     client: SecurityScorecardClient,
     companies: list[Company],
+    report_types: tuple[str, ...],
 ) -> list[PendingReport]:
-    """Request both report types; never reuse a report from a prior run.
+    """Request the selected report types; never reuse a report from a prior run.
 
     Each worker owns a separate requests session. This lets report generation
     start for multiple domains at once without sharing a Session across threads.
@@ -88,7 +90,7 @@ def _request_new_reports(
             )
             return index, []
         requested: list[PendingReport] = []
-        for report_type in ("detailed_report", "issue_report"):
+        for report_type in report_types:
             try:
                 requested.append(_request_single(worker_client, company, report_type))
                 logging.info(
@@ -212,20 +214,27 @@ def download_reports(
     client: SecurityScorecardClient,
     companies: list[Company],
     output_dir: Path,
+    report_types: tuple[str, ...] = REPORT_TYPES,
 ) -> list[Path]:
-    """Generate fresh Detailed PDFs and Issues CSVs, then save valid files only.
+    """Generate selected report types, then save valid files only.
 
     Every file is tied to a receipt returned during this invocation, preventing
     a stale report from a previous month from being downloaded by mistake.
     """
     if not companies:
         return []
+    invalid_types = set(report_types) - set(REPORT_TYPES)
+    if invalid_types:
+        raise ValueError(f"Unknown report type(s): {', '.join(sorted(invalid_types))}")
+    if not report_types:
+        return []
     output_dir.mkdir(parents=True, exist_ok=True)
     logging.info(
-        "Requesting fresh Detailed PDF and Issues CSV reports for %d companies…",
+        "Requesting fresh %s reports for %d companies…",
+        ", ".join(report_types),
         len(companies),
     )
-    pending = _request_new_reports(client, companies)
+    pending = _request_new_reports(client, companies, report_types)
     if not pending:
         return []
     completed = _wait_for_current_batch(client, pending)

@@ -11,6 +11,7 @@ if str(PROJECT_DIR) not in sys.path:
 
 from models import Company
 from config import CONFIG_PATH, load_config, validate_ssc_config
+from constants import OPTION_VENDORS
 from Services.scores import SCORE_HISTORY_PATH, append_score_history, display_scores
 from ssc_client import SecurityScorecardClient
 
@@ -37,6 +38,13 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=SCORE_HISTORY_PATH,
         help="Excel workbook that receives appended score history.",
+    )
+    parser.add_argument(
+        "--cycle",
+        type=int,
+        choices=sorted(OPTION_VENDORS),
+        required=True,
+        help="Portfolio cycle to record; each cycle can be exported once per month.",
     )
 
     return parser.parse_args()
@@ -83,7 +91,7 @@ def main() -> None:
         # Display the scores and append them to the Excel history.
         display_scores(companies)
 
-        appended = append_score_history(companies, args.history)
+        appended = append_score_history(companies, args.cycle, args.history)
 
         logging.info(
             "Appended %d score records to %s",
