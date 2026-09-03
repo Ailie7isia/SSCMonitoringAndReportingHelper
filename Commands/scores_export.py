@@ -44,7 +44,7 @@ def parse_args() -> argparse.Namespace:
         type=int,
         choices=sorted(OPTION_VENDORS),
         required=True,
-        help="Portfolio cycle to record; each cycle can be exported once per month.",
+        help="Portfolio cycle to record.",
     )
 
     return parser.parse_args()

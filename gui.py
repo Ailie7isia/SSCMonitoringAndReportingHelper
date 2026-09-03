@@ -9,7 +9,7 @@ import queue
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from tkinter import messagebox
+from tkinter import TclError, messagebox
 from typing import Callable
 
 import customtkinter as ctk
@@ -17,7 +17,12 @@ import customtkinter as ctk
 from config import CONFIG_PATH, REPORTS_DIR, load_config, validate_ssc_config
 from constants import OPTION_LABELS, OPTION_VENDORS
 from models import Company
-from Services.portfolio import apply_plan, companies_from_payload, compute_plan, target_domains
+from Services.portfolio import (
+    apply_plan,
+    companies_from_payload,
+    compute_plan,
+    target_domains,
+)
 from Services.reports import download_reports
 from Services.scores import (
     SCORE_HISTORY_PATH,
@@ -121,10 +126,20 @@ class Dashboard(ctk.CTk):
         domains.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=7, pady=7)
         domains.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(domains, text="Currently active domains", font=("Segoe UI", 17, "bold")).grid(row=0, column=0, sticky="w", padx=20, pady=(17, 1))
-        ctk.CTkLabel(domains, text="Live scores are color-coded by company grade", font=("Segoe UI", 14), text_color=MUTED).grid(row=1, column=0, sticky="w", padx=20)
-        self.domain_rows = ctk.CTkScrollableFrame(domains, height=245, fg_color="#0E1821", corner_radius=9)
+        ctk.CTkLabel(domains, text="Select rows and press Ctrl+C to copy • Double-click a row for details", font=("Segoe UI", 14), text_color=MUTED).grid(row=1, column=0, sticky="w", padx=20)
+        self.domain_rows = ctk.CTkTextbox(
+            domains,
+            height=245,
+            fg_color="#0E1821",
+            corner_radius=9,
+            font=("Cascadia Mono", 14),
+            wrap="none",
+        )
         self.domain_rows.grid(row=2, column=0, sticky="ew", padx=20, pady=(12, 20))
-        self.domain_rows.grid_columnconfigure(0, weight=1)
+        self.domain_rows.bind("<Control-c>", self._copy_selected_domain_rows)
+        self.domain_rows.bind("<Control-C>", self._copy_selected_domain_rows)
+        self.domain_rows.bind("<Double-Button-1>", self._open_selected_domain_details)
+        self._domain_by_name: dict[str, Company] = {}
         self._render_domains([])
 
         actions = ctk.CTkFrame(body, fg_color=PANEL, corner_radius=14)
@@ -201,16 +216,16 @@ class Dashboard(ctk.CTk):
         self.log_queue.put(text)
 
     def _update_history_status(self) -> tuple[datetime | None, int]:
-        """Show whether any cycle's score snapshot is already in Excel."""
+        """Show the most recent score-history update made this month."""
         saved_at, records = current_month_history_status()
         if saved_at is None:
             self.history_status.configure(
-                text="○  Select a cycle to save\nthis month's score history",
+                text="○  No score history saved\nthis month yet",
                 text_color="#F2B84B",
             )
         else:
             self.history_status.configure(
-                text=f"✓  Cycle history saved this month\n{saved_at:%d %b %Y, %H:%M} • {records} records",
+                text=f"✓  Latest history update\n{saved_at:%d %b %Y, %H:%M} • {records} records this month",
                 text_color=ACCENT,
             )
         return saved_at, records
@@ -320,29 +335,39 @@ class Dashboard(ctk.CTk):
         self.metric_subtitles["kalbe"].configure(text=text, text_color=color)
 
     def _render_domains(self, companies: list[Company]) -> None:
-        for widget in self.domain_rows.winfo_children():
-            widget.destroy()
+        self._domain_by_name = {}
+        self.domain_rows.configure(state="normal")
+        self.domain_rows.delete("1.0", "end")
         if not companies:
-            ctk.CTkLabel(self.domain_rows, text="No active domains loaded yet.", font=("Segoe UI", 14), text_color=MUTED).grid(row=0, column=0, sticky="w", padx=12, pady=12)
+            self.domain_rows.insert("end", "No active domains loaded yet.")
+            self.domain_rows.configure(state="disabled")
             return
-        for row, company in enumerate(sorted(companies, key=lambda item: item.domain.lower())):
+        for company in sorted(companies, key=lambda item: item.domain.lower()):
             grade = company.grade.upper() if company.grade else "Unknown"
-            color = GRADE_COLORS.get(grade, "#718899")
-            line = ctk.CTkFrame(self.domain_rows, fg_color="transparent")
-            line.grid(row=row, column=0, sticky="ew", padx=5, pady=2)
-            line.grid_columnconfigure(0, weight=1)
-            ctk.CTkButton(
-                line,
-                text=company.domain,
-                anchor="w",
-                command=lambda selected=company: self.open_domain_details(selected),
-                fg_color="transparent",
-                hover_color=PANEL_ALT,
-                font=("Segoe UI", 14),
-            ).grid(row=0, column=0, sticky="ew", padx=(3, 12), pady=2)
             score = "—" if company.score is None else str(company.score)
-            ctk.CTkLabel(line, text=score, width=48, corner_radius=7, fg_color=color, text_color="#10202A", font=("Segoe UI", 14, "bold")).grid(row=0, column=1, padx=(0, 7), pady=4)
-            ctk.CTkLabel(line, text=grade, width=58, text_color=color, font=("Segoe UI", 14, "bold")).grid(row=0, column=2, padx=(0, 7), pady=4)
+            self.domain_rows.insert("end", f"{company.domain:<42}  {score:>3}  {grade}\n")
+            self._domain_by_name[company.domain.lower()] = company
+        self.domain_rows.configure(state="disabled")
+
+    def _copy_selected_domain_rows(self, _event: object = None) -> str:
+        """Copy the selected domain rows from the read-only domain list."""
+        try:
+            selected = self.domain_rows.get("sel.first", "sel.last").rstrip()
+        except TclError:
+            return "break"
+        if selected:
+            self.clipboard_clear()
+            self.clipboard_append(selected)
+            self._log("✓ Copied selected active-domain rows to the clipboard.")
+        return "break"
+
+    def _open_selected_domain_details(self, event: object) -> None:
+        """Open the domain details for the row that was double-clicked."""
+        text_widget = self.domain_rows._textbox  # CustomTkinter's underlying Text widget.
+        index = text_widget.index(f"@{event.x},{event.y}")  # type: ignore[attr-defined]
+        domain = text_widget.get(f"{index} linestart", f"{index} lineend").split()
+        if domain and (company := self._domain_by_name.get(domain[0].lower())):
+            self.open_domain_details(company)
 
     def open_cycle_dialog(self) -> None:
         if self.busy:
@@ -707,57 +732,30 @@ class Dashboard(ctk.CTk):
     def start_score_export(self) -> None:
         if self.busy:
             return
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Update score history")
-        dialog.geometry("470x610")
-        dialog.resizable(False, False)
-        dialog.grab_set()
-        ctk.CTkLabel(dialog, text="Choose a portfolio cycle", font=("Segoe UI", 22, "bold")).pack(anchor="w", padx=28, pady=(28, 3))
-        ctk.CTkLabel(
-            dialog,
-            text="Each cycle can be added to the score-history workbook once per calendar month.",
-            justify="left",
-            wraplength=390,
-            font=("Segoe UI", 14),
-            text_color=MUTED,
-        ).pack(anchor="w", padx=28, pady=(0, 18))
-        cycle_options = sorted(OPTION_VENDORS)
-        selected = ctk.IntVar(value=cycle_options[0])
-        for option in cycle_options:
-            cycle_name = OPTION_LABELS.get(option, f"Cycle {option}")
-            ctk.CTkRadioButton(
-                dialog,
-                text=f"Cycle {option} — {cycle_name}",
-                variable=selected,
-                value=option,
-                font=("Segoe UI", 14),
-            ).pack(anchor="w", padx=31, pady=6)
+        self._export_score_history()
 
-        def update_history() -> None:
-            dialog.destroy()
-            self._export_score_history(selected.get())
-
-        ctk.CTkButton(dialog, text="Update score history", command=update_history, height=40, fg_color=ACCENT, hover_color="#249E74", font=("Segoe UI", 14)).pack(fill="x", padx=28, pady=27)
-
-    def _export_score_history(self, cycle: int) -> None:
-        saved_at, _records = current_month_history_status(cycle=cycle)
-        if saved_at is not None:
-            self._log(f"• Cycle {cycle} score history is already saved for this month; no duplicate Excel export was created.")
-            return
-
+    def _export_score_history(self) -> None:
         def export() -> None:
             client, portfolio_id = self._client()
+            portfolio_entries = client.fetch_portfolio_companies(portfolio_id)
             companies: list[Company] = []
-            for item in client.fetch_portfolio_companies(portfolio_id):
-                domain = item.get("domain") or item.get("website")
+            for item in portfolio_entries:
+                domain = str(item.get("domain") or item.get("website") or "").strip()
                 if not domain:
                     continue
                 details = client.get_company(domain)
-                companies.append(Company(domain, item.get("name", domain), str(details.get("grade") or "").upper(), details.get("score")))
-            appended = append_score_history(companies, cycle)
+                companies.append(
+                    Company(
+                        str(details.get("domain") or domain),
+                        str(details.get("name") or item.get("name") or domain),
+                        str(details.get("grade") or "").upper(),
+                        details.get("score"),
+                    )
+                )
+            appended = append_score_history(companies, "Live portfolio")
             self.after(0, self._update_history_status)
-            self._log(f"✓ Added {appended} Cycle {cycle} score records to {SCORE_HISTORY_PATH}.")
-        self._run(f"Updating Cycle {cycle} score history", export)
+            self._log(f"✓ Added {appended} live portfolio score records to {SCORE_HISTORY_PATH}.")
+        self._run("Updating live portfolio score history", export)
 
 
 def main() -> None:

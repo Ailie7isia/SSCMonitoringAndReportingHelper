@@ -225,15 +225,13 @@ def display_scores(companies: list[Company]) -> None:
 
 def append_score_history(
     companies: list[Company],
-    cycle: int,
+    cycle: int | str,
     output_file: Path = SCORE_HISTORY_PATH,
 ) -> int:
-    """Append one timestamped record per company for a cycle's monthly snapshot."""
-    saved_at, _records = current_month_history_status(output_file, cycle)
-    if saved_at is not None:
+    """Append one timestamped score record per company for a source group."""
+    if not companies:
         raise ValueError(
-            f"Cycle {cycle} score history was already updated this month "
-            f"({saved_at:%d %b %Y, %H:%M} UTC)."
+            f"{cycle} has no live score records to add; the workbook was not changed."
         )
     if output_file.exists():
         workbook = load_workbook(output_file)
@@ -273,7 +271,15 @@ def append_score_history(
         if grade in GRADE_FILLS:
             worksheet.cell(row=row, column=5).fill = PatternFill("solid", fgColor=GRADE_FILLS[grade])
 
-    workbook.save(output_file)
+    try:
+        workbook.save(output_file)
+    except PermissionError as exc:
+        raise PermissionError(
+            f"Cannot update {output_file.name} because it is open in Excel. "
+            "Close the workbook and try Update score again."
+        ) from exc
+    finally:
+        workbook.close()
     return len(companies)
 
 
