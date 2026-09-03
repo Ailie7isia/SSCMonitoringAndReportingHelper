@@ -9,7 +9,7 @@ import queue
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from tkinter import TclError, messagebox
+from tkinter import messagebox
 from typing import Callable
 
 import customtkinter as ctk
@@ -126,20 +126,22 @@ class Dashboard(ctk.CTk):
         domains.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=7, pady=7)
         domains.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(domains, text="Currently active domains", font=("Segoe UI", 17, "bold")).grid(row=0, column=0, sticky="w", padx=20, pady=(17, 1))
-        ctk.CTkLabel(domains, text="Select rows and press Ctrl+C to copy • Double-click a row for details", font=("Segoe UI", 14), text_color=MUTED).grid(row=1, column=0, sticky="w", padx=20)
-        self.domain_rows = ctk.CTkTextbox(
+        ctk.CTkLabel(domains, text="Live scores are color-coded by company grade", font=("Segoe UI", 14), text_color=MUTED).grid(row=1, column=0, sticky="w", padx=20)
+        self.copy_domains_button = ctk.CTkButton(
             domains,
-            height=245,
-            fg_color="#0E1821",
-            corner_radius=9,
-            font=("Cascadia Mono", 14),
-            wrap="none",
+            text="Copy all",
+            width=98,
+            height=30,
+            command=self._copy_active_domains,
+            fg_color=PANEL_ALT,
+            hover_color="#2C4354",
+            font=("Segoe UI", 13, "bold"),
+            state="disabled",
         )
+        self.copy_domains_button.grid(row=0, column=1, rowspan=2, sticky="e", padx=20, pady=(12, 0))
+        self.domain_rows = ctk.CTkScrollableFrame(domains, height=245, fg_color="#0E1821", corner_radius=9)
         self.domain_rows.grid(row=2, column=0, sticky="ew", padx=20, pady=(12, 20))
-        self.domain_rows.bind("<Control-c>", self._copy_selected_domain_rows)
-        self.domain_rows.bind("<Control-C>", self._copy_selected_domain_rows)
-        self.domain_rows.bind("<Double-Button-1>", self._open_selected_domain_details)
-        self._domain_by_name: dict[str, Company] = {}
+        self.domain_rows.grid_columnconfigure(0, weight=1)
         self._render_domains([])
 
         actions = ctk.CTkFrame(body, fg_color=PANEL, corner_radius=14)
@@ -335,39 +337,43 @@ class Dashboard(ctk.CTk):
         self.metric_subtitles["kalbe"].configure(text=text, text_color=color)
 
     def _render_domains(self, companies: list[Company]) -> None:
-        self._domain_by_name = {}
-        self.domain_rows.configure(state="normal")
-        self.domain_rows.delete("1.0", "end")
+        for widget in self.domain_rows.winfo_children():
+            widget.destroy()
         if not companies:
-            self.domain_rows.insert("end", "No active domains loaded yet.")
-            self.domain_rows.configure(state="disabled")
+            self.copy_domains_button.configure(state="disabled")
+            ctk.CTkLabel(self.domain_rows, text="No active domains loaded yet.", font=("Segoe UI", 14), text_color=MUTED).grid(row=0, column=0, sticky="w", padx=12, pady=12)
             return
-        for company in sorted(companies, key=lambda item: item.domain.lower()):
+        self.copy_domains_button.configure(state="normal")
+        for row, company in enumerate(sorted(companies, key=lambda item: item.domain.lower())):
+            grade = company.grade.upper() if company.grade else "Unknown"
+            color = GRADE_COLORS.get(grade, "#718899")
+            line = ctk.CTkFrame(self.domain_rows, fg_color="transparent")
+            line.grid(row=row, column=0, sticky="ew", padx=5, pady=2)
+            line.grid_columnconfigure(0, weight=1)
+            ctk.CTkButton(
+                line,
+                text=company.domain,
+                anchor="w",
+                command=lambda selected=company: self.open_domain_details(selected),
+                fg_color="transparent",
+                hover_color=PANEL_ALT,
+                font=("Segoe UI", 14),
+            ).grid(row=0, column=0, sticky="ew", padx=(3, 12), pady=2)
+            score = "—" if company.score is None else str(company.score)
+            ctk.CTkLabel(line, text=score, width=48, corner_radius=7, fg_color=color, text_color="#10202A", font=("Segoe UI", 14, "bold")).grid(row=0, column=1, padx=(0, 7), pady=4)
+            ctk.CTkLabel(line, text=grade, width=58, text_color=color, font=("Segoe UI", 14, "bold")).grid(row=0, column=2, padx=(0, 7), pady=4)
+
+    def _copy_active_domains(self) -> None:
+        """Copy every currently active domain and its latest score details."""
+        rows = []
+        for company in sorted(self.current_companies, key=lambda item: item.domain.lower()):
             grade = company.grade.upper() if company.grade else "Unknown"
             score = "—" if company.score is None else str(company.score)
-            self.domain_rows.insert("end", f"{company.domain:<42}  {score:>3}  {grade}\n")
-            self._domain_by_name[company.domain.lower()] = company
-        self.domain_rows.configure(state="disabled")
-
-    def _copy_selected_domain_rows(self, _event: object = None) -> str:
-        """Copy the selected domain rows from the read-only domain list."""
-        try:
-            selected = self.domain_rows.get("sel.first", "sel.last").rstrip()
-        except TclError:
-            return "break"
-        if selected:
+            rows.append(f"{company.domain}\t{score}\t{grade}")
+        if rows:
             self.clipboard_clear()
-            self.clipboard_append(selected)
-            self._log("✓ Copied selected active-domain rows to the clipboard.")
-        return "break"
-
-    def _open_selected_domain_details(self, event: object) -> None:
-        """Open the domain details for the row that was double-clicked."""
-        text_widget = self.domain_rows._textbox  # CustomTkinter's underlying Text widget.
-        index = text_widget.index(f"@{event.x},{event.y}")  # type: ignore[attr-defined]
-        domain = text_widget.get(f"{index} linestart", f"{index} lineend").split()
-        if domain and (company := self._domain_by_name.get(domain[0].lower())):
-            self.open_domain_details(company)
+            self.clipboard_append("\n".join(rows))
+            self._log(f"✓ Copied {len(rows)} active domains to the clipboard.")
 
     def open_cycle_dialog(self) -> None:
         if self.busy:
