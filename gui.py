@@ -7,7 +7,7 @@ import logging
 import os
 import queue
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tkinter import messagebox
 from typing import Callable
@@ -34,8 +34,8 @@ from Services.scores import (
     score_change_over_past_month,
     score_trends_from_history,
 )
-from ssc_client import ApiRequestError, SecurityScorecardClient
-from utils import normalize_domain, sanitize_filename
+from ssc_client import ApiRequestError, RateLimitError, SecurityScorecardClient
+from utils import format_duration, normalize_domain, sanitize_filename
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("green")
@@ -78,6 +78,8 @@ class Dashboard(ctk.CTk):
         self.active_cycle: int | None = None
         self.trends_page: ctk.CTkFrame | None = None
         self.report_page: ctk.CTkFrame | None = None
+        self._rate_limit_resume_at: datetime | None = None
+        self._rate_limit_job: str | None = None
         self._build_layout()
         self._build_loading_overlay()
         self.after(150, self._poll_log_queue)
@@ -104,6 +106,15 @@ class Dashboard(ctk.CTk):
             text_color=ACCENT,
         )
         self.sidebar_status.pack(side="bottom", anchor="w", fill="x", padx=24, pady=22)
+        # Shown above the status only while SecurityScorecard's request quota is exhausted.
+        self.rate_limit_status = ctk.CTkLabel(
+            sidebar,
+            text="",
+            justify="left",
+            wraplength=200,
+            font=("Segoe UI", 12, "bold"),
+            text_color="#F2B84B",
+        )
 
         self.dashboard_header = ctk.CTkFrame(self, height=112, corner_radius=0, fg_color=BACKGROUND)
         self.dashboard_header.grid(row=0, column=1, sticky="new", padx=35)
@@ -265,6 +276,43 @@ class Dashboard(ctk.CTk):
     def _log(self, text: str) -> None:
         self.log_queue.put(text)
 
+    def _show_rate_limit_countdown(self, resume_at: datetime | None) -> None:
+        """Show when SecurityScorecard's request quota is expected to reset."""
+        if self._rate_limit_job is not None:
+            self.after_cancel(self._rate_limit_job)
+            self._rate_limit_job = None
+        self._rate_limit_resume_at = resume_at
+        self._tick_rate_limit_countdown()
+
+    def _tick_rate_limit_countdown(self) -> None:
+        resume_at = self._rate_limit_resume_at
+        remaining = (resume_at - datetime.now().astimezone()).total_seconds() if resume_at else 0
+        if remaining <= 0:
+            self._rate_limit_resume_at = None
+            self._rate_limit_job = None
+            self.rate_limit_status.pack_forget()
+            return
+        self.rate_limit_status.configure(
+            text=f"⏳  SSC request limit reached\nResumes in {format_duration(remaining)} (at {resume_at:%H:%M:%S})"
+        )
+        self.rate_limit_status.pack(side="bottom", anchor="w", fill="x", padx=24, pady=(0, 2))
+        self._rate_limit_job = self.after(1000, self._tick_rate_limit_countdown)
+
+    def _report_rate_limit(self, exc: RateLimitError) -> None:
+        """Log a rate-limited operation and start the countdown when the reset time is known."""
+        if exc.retry_after is None:
+            self._log(
+                "✗ SecurityScorecard request limit reached. It did not say when the quota resets; "
+                "its general limit is a rolling 60-minute window, so try again later."
+            )
+            return
+        resume_at = datetime.now().astimezone() + timedelta(seconds=exc.retry_after)
+        self._log(
+            f"✗ SecurityScorecard request limit reached. Try again after {resume_at:%H:%M:%S} "
+            f"(in {format_duration(exc.retry_after)})."
+        )
+        self.after(0, lambda: self._show_rate_limit_countdown(resume_at))
+
     def _update_history_status(self) -> tuple[datetime | None, int]:
         """Show the most recent score-history update made this month."""
         saved_at, records = current_month_history_status()
@@ -317,6 +365,8 @@ class Dashboard(ctk.CTk):
         def worker() -> None:
             try:
                 task()
+            except RateLimitError as exc:
+                self._report_rate_limit(exc)
             except ApiRequestError as exc:
                 self._log(f"✗ SecurityScorecard request failed: {exc}")
             except (FileNotFoundError, ValueError) as exc:
@@ -516,7 +566,13 @@ class Dashboard(ctk.CTk):
                 self._log("• No domains require reports for the active cycle.")
                 return
             output_dir = REPORTS_DIR / datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            saved = download_reports(client, companies, output_dir, (report_type,))
+            saved = download_reports(
+                client,
+                companies,
+                output_dir,
+                (report_type,),
+                on_rate_limit=lambda resume_at: self.after(0, lambda: self._show_rate_limit_countdown(resume_at)),
+            )
             self._log(f"✓ Downloaded {len(saved)} of {len(companies)} {report_label} to {output_dir}.")
         # Report generation can take a while. The service logs each request,
         # wait cycle, and saved file, so keep the Activity panel exposed.

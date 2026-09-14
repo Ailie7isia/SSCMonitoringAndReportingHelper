@@ -150,9 +150,18 @@ The application:
 
 * creates new report requests for the current batch,
 * never selects a previous month's report,
-* validates downloads and retries an invalid file once,
+* validates downloads, downloading an invalid file again and generating a
+  replacement only if it is still invalid,
 * saves Detailed PDFs and Issues CSVs into separate date-stamped folders,
 * appends the domain to the filename when two companies share a display name.
+
+SecurityScorecard allows 5,000 API requests per rolling hour and applies a
+stricter, unpublished limit to Detailed report generation. Report requests are
+therefore sent one at a time, and status checks start every 15 seconds and slow
+to once a minute. When a request is rate-limited, the download waits for the
+time SecurityScorecard gives in its `Retry-After` header (or an estimated
+backoff when none is given) and then continues. The dashboard sidebar shows a
+countdown until requests resume.
 
 ---
 

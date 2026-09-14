@@ -5,7 +5,7 @@ from __future__ import annotations
 import itertools
 import threading
 
-from ssc_client import ApiRequestError
+from ssc_client import ApiRequestError, RateLimitError
 
 VALID_PDF = b"%PDF-1.7\n" + b"0" * 8192
 VALID_CSV = (
@@ -29,10 +29,16 @@ class FakeClient:
         self.fail_add: set[str] = set()
         self.fail_remove: set[str] = set()
         self.receipts: dict[str, tuple[str, str]] = {}
-        self.bad_first_download: set[str] = set()
+        # domain -> number of invalid downloads to serve before a valid one
+        self.bad_downloads: dict[str, int] = {}
         self.recent_report_errors = 0
+        # Status checks that report nothing finished yet.
+        self.pending_polls = 0
+        # 429 responses to raise from report creation, and the Retry-After they carry.
+        self.create_rate_limits = 0
+        self.rate_limit_retry_after: float | None = 42
+        self.list_recent_calls = 0
         self._ids = itertools.count(1)
-        self._served_bad: set[str] = set()
         self._lock = threading.Lock()
 
     def fetch_portfolio_companies(self, portfolio_id: str) -> list[dict]:
@@ -54,6 +60,9 @@ class FakeClient:
 
     def _receipt(self, domain: str, kind: str) -> dict:
         with self._lock:
+            if self.create_rate_limits:
+                self.create_rate_limits -= 1
+                raise RateLimitError("Too many requests", retry_after=self.rate_limit_retry_after)
             receipt_id = f"r{next(self._ids)}"
             self.receipts[receipt_id] = (domain, kind)
         return {"id": receipt_id}
@@ -66,9 +75,13 @@ class FakeClient:
 
     def list_recent_reports(self) -> list[dict]:
         with self._lock:
+            self.list_recent_calls += 1
             if self.recent_report_errors:
                 self.recent_report_errors -= 1
                 raise ApiRequestError("Service Unavailable", status_code=503)
+            if self.pending_polls:
+                self.pending_polls -= 1
+                return []
             return [
                 {"id": receipt_id, "download_url": f"https://files.test/{receipt_id}"}
                 for receipt_id in self.receipts
@@ -78,7 +91,7 @@ class FakeClient:
         receipt_id = download_url.rsplit("/", 1)[-1]
         domain, kind = self.receipts[receipt_id]
         with self._lock:
-            if domain in self.bad_first_download and domain not in self._served_bad:
-                self._served_bad.add(domain)
+            if self.bad_downloads.get(domain, 0) > 0:
+                self.bad_downloads[domain] -= 1
                 return ERROR_PAGE
         return VALID_PDF if kind == "pdf" else VALID_CSV

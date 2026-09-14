@@ -1,4 +1,5 @@
 from __future__ import annotations
+import math
 import re
 
 # -----------------------------------------------------------------------------
@@ -66,3 +67,13 @@ def make_filename(
         f"[{grade}] - {safe_name} - "
         f"{report_name} - {month}{extension}"
     )
+
+# Format a duration as m:ss, or h:mm:ss for an hour or longer.
+# Rounds up so a countdown never shows 0:00 while time remains.
+def format_duration(seconds: float) -> str:
+    total = max(0, math.ceil(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"

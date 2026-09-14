@@ -16,6 +16,7 @@ from tests.test_scores import write_history
 from models import Company
 from Services.portfolio import target_domains
 from Services.scores import HistoricalScoreTrend
+from ssc_client import RateLimitError
 
 try:
     import customtkinter as ctk
@@ -117,6 +118,30 @@ class DashboardTest(unittest.TestCase):
             (),
             "a success message is rendered red because it contains ' failed'",
         )
+
+    # Rate limits -------------------------------------------------------------------
+
+    def test_rate_limit_countdown_shows_time_left_and_clears(self):
+        self.addCleanup(self.app._show_rate_limit_countdown, None)
+        self.app._show_rate_limit_countdown(datetime.now().astimezone() + timedelta(seconds=90))
+        self.assertEqual(self.app.rate_limit_status.winfo_manager(), "pack")
+        self.assertRegex(self.app.rate_limit_status.cget("text"), r"Resumes in 1:(29|30) \(at \d\d:\d\d:\d\d\)")
+
+        self.app._show_rate_limit_countdown(None)
+        self.assertEqual(self.app.rate_limit_status.winfo_manager(), "")
+
+    def test_rate_limited_operation_starts_countdown(self):
+        self.addCleanup(self.app._show_rate_limit_countdown, None)
+
+        def task():
+            raise RateLimitError("Too many requests", retry_after=120)
+
+        self.app._run("Testing rate limit", task)
+        self.wait_until_idle()
+        self.app.update()
+        remaining = (self.app._rate_limit_resume_at - datetime.now().astimezone()).total_seconds()
+        self.assertAlmostEqual(remaining, 120, delta=5)
+        self.assertEqual(self.app.rate_limit_status.winfo_manager(), "pack")
 
     # Pages -------------------------------------------------------------------------
 
