@@ -25,13 +25,23 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
         return yaml.safe_load(file) or {}
 
 
-def validate_ssc_config(config: dict) -> tuple[str, str]:
-    """Return the API key and portfolio identifier after validation."""
-    ssc = config.get("securityscorecard", {})
-    api_key = str(ssc.get("api_key", "")).strip()
-    portfolio_id = str(ssc.get("portfolio_id", "")).strip()
-    if not api_key:
-        raise ValueError("Missing 'securityscorecard.api_key' in config.yaml.")
-    if not portfolio_id:
-        raise ValueError("Missing 'securityscorecard.portfolio_id' in config.yaml.")
+def _is_placeholder(value: str) -> bool:
+    return not value or value.upper().startswith("YOUR_")
+
+
+def validate_ssc_config(config: dict | None) -> tuple[str, str]:
+    """Return the API key and portfolio identifier after validation.
+
+    Blank template values (parsed by YAML as ``None``) and the README's
+    ``YOUR_...`` placeholders are rejected before any API call is made.
+    """
+    ssc = (config or {}).get("securityscorecard")
+    if not isinstance(ssc, dict):
+        ssc = {}
+    api_key = str(ssc.get("api_key") or "").strip()
+    portfolio_id = str(ssc.get("portfolio_id") or "").strip()
+    if _is_placeholder(api_key):
+        raise ValueError("Set 'securityscorecard.api_key' in config.yaml.")
+    if _is_placeholder(portfolio_id):
+        raise ValueError("Set 'securityscorecard.portfolio_id' in config.yaml.")
     return api_key, portfolio_id

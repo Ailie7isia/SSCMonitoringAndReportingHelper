@@ -12,8 +12,10 @@ if str(PROJECT_DIR) not in sys.path:
 from models import Company
 from config import CONFIG_PATH, load_config, validate_ssc_config
 from constants import OPTION_VENDORS
+from Services.portfolio import companies_for_cycle_action, companies_from_payload
 from Services.scores import SCORE_HISTORY_PATH, append_score_history, display_scores
 from ssc_client import SecurityScorecardClient
+from utils import normalize_domain
 
 # -----------------------------------------------------------------------------
 # This file serves as the entry point for retrieving SecurityScorecard
@@ -21,7 +23,7 @@ from ssc_client import SecurityScorecardClient
 # -----------------------------------------------------------------------------
 
 # Parse command-line arguments for the score export command.
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Display and append SecurityScorecard portfolio scores."
     )
@@ -47,17 +49,17 @@ def parse_args() -> argparse.Namespace:
         help="Portfolio cycle to record.",
     )
 
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
 
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(message)s",
     )
 
-    args = parse_args()
+    args = parse_args(argv)
 
     try:
         # Load application configuration.
@@ -71,11 +73,20 @@ def main() -> None:
         # Retrieve the companies in the current portfolio.
         entries = client.fetch_portfolio_companies(portfolio_id)
 
+        selected_domains = {
+            company.domain
+            for company in companies_for_cycle_action(
+                companies_from_payload(entries), args.cycle
+            )
+        }
         companies = []
 
         # Retrieve each company's latest score and grade.
         for item in entries:
-            domain = item["domain"]
+            # Match companies_from_payload, which also accepts "website".
+            domain = str(item.get("domain") or item.get("website") or "").strip()
+            if not domain or normalize_domain(domain) not in selected_domains:
+                continue
 
             details = client.get_company(domain)
 

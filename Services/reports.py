@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -11,7 +12,7 @@ from pathlib import Path
 
 from models import Company
 from ssc_client import SecurityScorecardClient
-from utils import make_filename
+from utils import make_filename, sanitize_filename
 
 
 # Keep report requests polite to the API while avoiding one slow domain holding
@@ -145,7 +146,14 @@ def _wait_for_current_batch(
     completed: dict[str, dict] = {}
     deadline = time.monotonic() + timeout
     while wanted - completed.keys() and time.monotonic() < deadline:
-        for report in client.list_recent_reports():
+        try:
+            recent = client.list_recent_reports()
+        except Exception as exc:
+            # A transient API error must not discard a batch that may have
+            # been generating for many minutes; keep polling until timeout.
+            logging.warning("Could not check report status (%s); retrying in %d seconds…", exc, interval)
+            recent = []
+        for report in recent:
             receipt_id = str(report.get("id") or "")
             if receipt_id in wanted and report.get("download_url"):
                 completed[receipt_id] = report
@@ -181,11 +189,27 @@ def _validate_download(content: bytes, extension: str, domain: str) -> None:
             raise ValueError(f"Downloaded {domain} issues report is empty or an error page.")
 
 
-def _destination(output_dir: Path, item: PendingReport) -> Path:
+def _file_labels(companies: list[Company]) -> dict[str, str]:
+    """Name each domain's files, adding the domain when display names collide.
+
+    Windows paths are case-insensitive, so names are compared that way.
+    """
+    counts = Counter(sanitize_filename(company.name).lower() for company in companies)
+    return {
+        company.domain: (
+            company.name
+            if counts[sanitize_filename(company.name).lower()] == 1
+            else f"{company.name} ({company.domain})"
+        )
+        for company in companies
+    }
+
+
+def _destination(output_dir: Path, item: PendingReport, label: str) -> Path:
     month = datetime.now(timezone.utc).strftime("%B %Y")
     filename = make_filename(
         item.company.grade or "Unknown",
-        item.company.name,
+        label,
         month,
         item.report_type,
         extension=item.extension,
@@ -199,10 +223,11 @@ def _save_completed_report(
     item: PendingReport,
     report: dict,
     output_dir: Path,
+    label: str,
 ) -> Path:
     content = client.download_report(str(report["download_url"]))
     _validate_download(content, item.extension, item.company.domain)
-    destination = _destination(output_dir, item)
+    destination = _destination(output_dir, item, label)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(destination.suffix + ".part")
     temporary.write_bytes(content)
@@ -229,6 +254,7 @@ def download_reports(
     if not report_types:
         return []
     output_dir.mkdir(parents=True, exist_ok=True)
+    labels = _file_labels(companies)
     logging.info(
         "Requesting fresh %s reports for %d companies…",
         ", ".join(report_types),
@@ -245,7 +271,8 @@ def download_reports(
             logging.error("[%s] %s was not ready before timeout.", item.company.domain, item.report_type)
             continue
         try:
-            destination = _save_completed_report(client, item, report, output_dir)
+            label = labels.get(item.company.domain, item.company.name)
+            destination = _save_completed_report(client, item, report, output_dir, label)
             saved.append(destination)
             logging.info("[%s] Saved %s", item.company.domain, destination.name)
         except Exception as exc:
@@ -264,7 +291,7 @@ def download_reports(
                 ).get(retry.receipt_id)
                 if retry_report is None:
                     raise TimeoutError("replacement report was not ready within 10 minutes")
-                destination = _save_completed_report(client, retry, retry_report, output_dir)
+                destination = _save_completed_report(client, retry, retry_report, output_dir, label)
                 saved.append(destination)
                 logging.info("[%s] Saved retry %s", item.company.domain, destination.name)
             except Exception as retry_exc:

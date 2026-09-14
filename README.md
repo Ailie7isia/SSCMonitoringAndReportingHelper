@@ -2,12 +2,12 @@
 
 ## Overview
 
-The **SecurityScorecard Monitoring and Reporting Helper** is a Python command-line application that automates common SecurityScorecard portfolio management tasks.
+The **SecurityScorecard Monitoring and Reporting Helper** is a Python desktop and command-line application that automates common SecurityScorecard portfolio management tasks.
 
 The toolkit provides three main functions:
 * **Portfolio Cycle** – Add and remove companies based on predefined portfolio cycles.
-* **Download Reports** – Download the latest SecurityScorecard reports for every company in the portfolio.
-* **Export Scores** – Export company scores and grades to a JSON file.
+* **Download Reports** – Generate and download fresh Detailed PDF and Issues CSV reports for the active cycle.
+* **Update Score History** – Append company scores and grades to an Excel score-history workbook.
 
 The application is designed with a modular structure so that each feature is separated into command, service, and utility layers.
 
@@ -18,7 +18,7 @@ The application is designed with a modular structure so that each feature is sep
 ```text
 .
 ├── Commands/
-│   ├── cycle.py
+│   ├── portfolio_cycle.py
 │   ├── reports_download.py
 │   └── scores_export.py
 │
@@ -28,13 +28,17 @@ The application is designed with a modular structure so that each feature is sep
 │   ├── reports.py
 │   └── scores.py
 │
+├── Guides/
+├── tests/
+│
 ├── config.py
-├── constants.py
+├── config_template.yaml   (copy to config.yaml)
+├── constants_template.py  (copy to constants.py)
+├── gui.py
+├── main.py
 ├── models.py
 ├── ssc_client.py
 ├── utils.py
-├── main.py
-├── config.example.yaml
 └── README.md
 ```
 
@@ -56,7 +60,9 @@ pip install -r requirements.txt
 
 ## Configuration
 
-Create a file named **config.yaml** in the project root.
+Copy **config_template.yaml** to **config.yaml** in the project root and fill
+in your credentials. Copy **constants_template.py** to **constants.py** and
+fill in the pinned domains and portfolio cycles.
 
 Example:
 
@@ -100,9 +106,21 @@ You will be presented with a menu similar to:
 
 1. Portfolio Cycle
 2. Download Reports
-3. Export Scores
+3. Update Score History
 0. Exit
 ```
+
+Download Reports and Update Score History ask which cycle is being processed.
+Each command can also be run directly:
+
+```bash
+python Commands/portfolio_cycle.py --option 3 --dry-run
+python Commands/reports_download.py --cycle 3
+python Commands/scores_export.py --cycle 3
+```
+
+Permanently pinned domains are processed with cycle 1 only, so later cycles do
+not create duplicate reports or score-history rows.
 
 ---
 
@@ -133,11 +151,12 @@ The application:
 * creates new report requests for the current batch,
 * never selects a previous month's report,
 * validates downloads and retries an invalid file once,
-* saves Detailed PDFs and Issues CSVs into separate date-stamped folders.
+* saves Detailed PDFs and Issues CSVs into separate date-stamped folders,
+* appends the domain to the filename when two companies share a display name.
 
 ---
 
-### 3. Export Scores
+### 3. Update Score History
 
 Retrieves the latest company scores and appends a timestamped record for every
 company to the configured Excel score-history workbook.
@@ -148,14 +167,27 @@ SSC Helper Log.xlsx
 
 Each exported record contains:
 
-* Company name
+* Retrieval time (UTC)
 * Domain
-* SecurityScorecard grade
+* Company name
 * SecurityScorecard score
+* SecurityScorecard grade
+* Cycle
 
-To use a different workbook on another computer, set the
-`SSC_SCORE_HISTORY_PATH` environment variable to its full `.xlsx` path before
-starting the app.
+The workbook is stored in the project root by default. To use a different
+workbook, set the `SSC_SCORE_HISTORY_PATH` environment variable to its full
+`.xlsx` path before starting the app.
+
+---
+
+## Testing
+
+The test suite runs offline against a fake SecurityScorecard client and a
+temporary workbook, so it never changes the live portfolio or score history:
+
+```bash
+.venv\Scripts\python.exe -m unittest discover -s tests -t . -v
+```
 
 ---
 

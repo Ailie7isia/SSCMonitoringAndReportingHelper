@@ -11,7 +11,9 @@ if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
 from Services.portfolio import companies_from_payload
+from Services.portfolio import companies_for_cycle_action
 from Services.reports import download_reports
+from constants import OPTION_VENDORS
 from ssc_client import SecurityScorecardClient
 from config import (
     CONFIG_PATH,
@@ -27,7 +29,7 @@ from config import (
 # -----------------------------------------------------------------------------
 
 # Parse command-line arguments for the report download command.
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Download SecurityScorecard reports."
     )
@@ -45,18 +47,25 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Output directory for downloaded reports.",
     )
+    parser.add_argument(
+        "--cycle",
+        type=int,
+        choices=sorted(OPTION_VENDORS),
+        required=True,
+        help="Portfolio cycle being processed.",
+    )
 
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
 
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(message)s",
     )
 
-    args = parse_args()
+    args = parse_args(argv)
 
     try:
         # Load application configuration.    
@@ -73,9 +82,10 @@ def main() -> None:
         companies = companies_from_payload(
             client.fetch_portfolio_companies(portfolio_id)
         )
+        companies = companies_for_cycle_action(companies, args.cycle)
 
         if not companies:
-            logging.warning("Portfolio is empty.")
+            logging.warning("No domains require reports for cycle %s.", args.cycle)
             return
 
         today = datetime.now(
@@ -88,7 +98,7 @@ def main() -> None:
             or REPORTS_DIR / today
         )
 
-        # Download reports for all companies in the portfolio.
+        # Download reports for the domains assigned to this cycle.
         saved = download_reports(
             client,
             companies,

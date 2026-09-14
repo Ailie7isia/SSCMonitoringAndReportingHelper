@@ -10,6 +10,7 @@ if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
 from config import CONFIG_PATH, load_config, validate_ssc_config
+from constants import OPTION_VENDORS
 from ssc_client import SecurityScorecardClient
 from Services.cycle import run_cycle
 
@@ -20,7 +21,7 @@ from Services.cycle import run_cycle
 # -----------------------------------------------------------------------------
 
 # Parse command-line arguments for the portfolio cycle command.
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(
         description="Run a SecurityScorecard portfolio cycle."
@@ -35,8 +36,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--option",
         type=int,
-        choices=range(1, 6),
-        help="Portfolio cycle (1-5).",
+        choices=sorted(OPTION_VENDORS),
+        help="Portfolio cycle to apply.",
     )
 
     parser.add_argument(
@@ -56,17 +57,17 @@ def parse_args() -> argparse.Namespace:
         default=0.35,
     )
 
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
 
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(message)s",
     )
 
-    args = parse_args()
+    args = parse_args(argv)
 
     try:
         # Load application configuration.

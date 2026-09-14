@@ -93,6 +93,27 @@ def target_domains(option: int) -> set[str]:
     # Combine pinned and selected domains.
     return pinned | selected
 
+
+def companies_for_cycle_action(
+    companies: Iterable[Company],
+    option: int | None,
+) -> list[Company]:
+    """Return the domains an action should process for the active cycle.
+
+    Permanently pinned domains are processed with cycle 1 only, preventing
+    duplicate downloads and score-history rows in later cycles.
+    """
+    companies = list(companies)
+    if option in (None, 1):
+        return companies
+
+    pinned = {normalize_domain(domain) for domain in ALWAYS_PINNED}
+    return [
+        company
+        for company in companies
+        if normalize_domain(company.domain) not in pinned
+    ]
+
 # Compare the current portfolio with the target list and determine
 # which domains need to be added or removed.
 def compute_plan(
@@ -181,8 +202,9 @@ def apply_plan(
 def prompt_option() -> int:
     print("\nChoose a portfolio cycle:\n")
 
-    for option in sorted(OPTION_LABELS):
-        label = OPTION_LABELS[option]
+    options = sorted(OPTION_VENDORS)
+    for option in options:
+        label = OPTION_LABELS.get(option, f"Cycle {option}")
         count = len(OPTION_VENDORS[option])
 
         print(f"  {option}. {label} ({count} companies)")
@@ -192,14 +214,14 @@ def prompt_option() -> int:
     # Keep asking until a valid option is entered.
     while True:
         try:
-            raw = input("Enter option [1-5]: ").strip()
+            raw = input(f"Enter option [{options[0]}-{options[-1]}]: ").strip()
         except EOFError:
             raise KeyboardInterrupt
 
         try:
             option = int(raw)
         except ValueError:
-            print("Please enter a number between 1 and 5.\n")
+            print(f"Please enter a number between {options[0]} and {options[-1]}.\n")
             continue
 
         if option in OPTION_VENDORS:
@@ -248,13 +270,3 @@ def print_summary(report: CycleApplyReport) -> None:
             print(f"    {reason}")
 
     print()
-
-# Return the expected domain order for the selected portfolio cycle.
-# Pinned domains are always listed first
-def target_domain_order(option: int) -> list[str]:
-    return [
-        normalize_domain(domain)
-        for domain in (
-            list(ALWAYS_PINNED) + OPTION_VENDORS[option]
-        )
-    ]

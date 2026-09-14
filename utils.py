@@ -6,8 +6,7 @@ import re
 # parts of the program, such as:
 # - formatting filenames for downloaded reports,
 # - cleaning up company names and domains,
-# - standardizing SecurityScorecard data,
-# - validating the application configuration.
+# - standardizing SecurityScorecard data.
 
 # Keeping these common functions in one place avoids repeating the same
 # code in multiple files and makes future maintenance easier.
@@ -16,14 +15,17 @@ import re
 # Regex patterns used for filename sanitization.
 _INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1F]')
 _MULTIPLE_SPACES = re.compile(r"\s+")
+# Zero-width characters survive str.strip() and often arrive via copy-paste.
+_INVISIBLE_CHARS = re.compile("[\u200b-\u200d\u2060\ufeff]")
 
 # Normalize grade by capitaling string.
 def normalize_grade(value: object) -> str:
     return str(value or "").strip().upper()
 
-# Normalize a domain by removing whitespace and converting to lowercase.
+# Normalize a domain by removing invisible characters and whitespace and
+# converting to lowercase.
 def normalize_domain(value: str) -> str:
-    return value.strip().lower()
+    return _INVISIBLE_CHARS.sub("", value).strip().lower()
 
 # Remove characters that are invalid in filenames and clean up spacing.
 # Returns "Unknown" if the resulting filename is empty.
@@ -64,17 +66,3 @@ def make_filename(
         f"[{grade}] - {safe_name} - "
         f"{report_name} - {month}{extension}"
     )
-
-# Validate the SecurityScorecard configuration before making API calls.
-# Returns the API key and portfolio ID if both are valid.
-def validate_ssc_config(config: dict) -> tuple[str, str]:
-    ssc = config.get("securityscorecard") or {}
-    api_key = str(ssc.get("api_key") or "").strip()
-    portfolio_id = str(ssc.get("portfolio_id") or "").strip()
-
-    if not api_key or api_key.upper().startswith("YOUR_"):
-        raise ValueError("config.yaml: set securityscorecard.api_key")
-    if not portfolio_id:
-        raise ValueError("config.yaml: set securityscorecard.portfolio_id")
-
-    return api_key, portfolio_id

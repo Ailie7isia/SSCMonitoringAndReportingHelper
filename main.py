@@ -13,17 +13,19 @@ def run_cli() -> None:
     from Commands.portfolio_cycle import main as portfolio_cycle
     from Commands.reports_download import main as reports_download
     from Commands.scores_export import main as scores_export
+    from Services.portfolio import prompt_option
 
+    # (name, command, whether the command needs a --cycle argument)
     menu = {
-        "1": ("Portfolio Cycle", portfolio_cycle),
-        "2": ("Download Reports", reports_download),
-        "3": ("Update Score History", scores_export),
+        "1": ("Portfolio Cycle", portfolio_cycle, False),
+        "2": ("Download Reports", reports_download, True),
+        "3": ("Update Score History", scores_export, True),
     }
     while True:
         print("\n" + "=" * 52)
         print(" SecurityScorecard Monitoring and Reporting Helper")
         print("=" * 52)
-        for key, (name, _) in menu.items():
+        for key, (name, _, _) in menu.items():
             print(f"{key}. {name}")
         print("0. Exit\n")
         try:
@@ -38,8 +40,10 @@ def run_cli() -> None:
         if command is None:
             print("\nInvalid option.")
             continue
+        _, run_command, needs_cycle = command
         try:
-            command[1]()
+            # The portfolio cycle command prompts for its own cycle.
+            run_command(["--cycle", str(prompt_option())] if needs_cycle else [])
         except KeyboardInterrupt:
             print("\nOperation cancelled.")
         except SystemExit:

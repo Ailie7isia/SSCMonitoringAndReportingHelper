@@ -13,12 +13,14 @@ from tkinter import messagebox
 from typing import Callable
 
 import customtkinter as ctk
+from openpyxl import load_workbook
 
 from config import CONFIG_PATH, REPORTS_DIR, load_config, validate_ssc_config
 from constants import OPTION_LABELS, OPTION_VENDORS
 from models import Company
 from Services.portfolio import (
     apply_plan,
+    companies_for_cycle_action,
     companies_from_payload,
     compute_plan,
     target_domains,
@@ -33,7 +35,7 @@ from Services.scores import (
     score_trends_from_history,
 )
 from ssc_client import ApiRequestError, SecurityScorecardClient
-from utils import sanitize_filename
+from utils import normalize_domain, sanitize_filename
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("green")
@@ -41,37 +43,12 @@ ctk.set_default_color_theme("green")
 BACKGROUND, PANEL, PANEL_ALT = "#101923", "#182532", "#213240"
 ACCENT, MUTED = "#2FBF8F", "#9CB2C2"
 GRADE_COLORS = {"A": "#35C98A", "B": "#F1BE4D", "C": "#F48F4A", "D": "#EE5D69", "F": "#C93546"}
-HEATMAP_COLORS = {
-    "A": ("#235C45", "#E6FFF4"),
-    "B": ("#285787", "#E8F3FF"),
-    "C": ("#80601C", "#FFF8DF"),
-    "D": ("#854A25", "#FFF0E8"),
-    "F": ("#842E3B", "#FFECEF"),
-    "unknown": (PANEL_ALT, MUTED),
-}
-FACTOR_ORDER = (
-    "Application Security",
-    "Cubit Score",
-    "DNS Health",
-    "Endpoint Security",
-    "Hacker Chatter",
-    "IP Reputation",
-    "Information Leak",
-    "Network Security",
-    "Patching Cadence",
-    "Social Engineering",
-)
-FACTOR_SHORT_NAMES = {
-    "Application Security": "App Sec",
-    "Cubit Score": "Cubit",
-    "DNS Health": "DNS",
-    "Endpoint Security": "Endpoint",
-    "Hacker Chatter": "Chatter",
-    "IP Reputation": "IP Rep",
-    "Information Leak": "Info Leak",
-    "Network Security": "Network",
-    "Patching Cadence": "Patching",
-    "Social Engineering": "Social Eng",
+REPORT_GRADE_STYLES = {
+    "A": ("A (90 – 100)", "#3FA548", "#0A2A0C"),
+    "B": ("B (80 – 89)", "#F2B705", "#3D2B00"),
+    "C": ("C (70 – 79)", "#F0790F", "#3D1900"),
+    "D": ("D (60 – 69)", "#D5312E", "#FFFFFF"),
+    "F": ("F (di bawah 60)", "#8B1A1A", "#FFFFFF"),
 }
 
 
@@ -81,7 +58,11 @@ class QueueLogHandler(logging.Handler):
         self.destination = destination
 
     def emit(self, record: logging.LogRecord) -> None:
-        self.destination.put(self.format(record))
+        message = self.format(record)
+        # Errors from the services are marked so the Activity panel shows them in red.
+        if record.levelno >= logging.ERROR:
+            message = f"✗ {message}"
+        self.destination.put(message)
 
 
 class Dashboard(ctk.CTk):
@@ -111,15 +92,6 @@ class Dashboard(ctk.CTk):
         ctk.CTkLabel(sidebar, text="SSC", font=("Segoe UI", 29, "bold"), text_color=ACCENT).pack(anchor="w", padx=27, pady=(31, 0))
         ctk.CTkLabel(sidebar, text="MONITORING HELPER", font=("Segoe UI", 14, "bold"), text_color=MUTED).pack(anchor="w", padx=29, pady=(0, 37))
         self.navigation_buttons: list[ctk.CTkButton] = []
-        self.history_status = ctk.CTkLabel(
-            sidebar,
-            text="Checking score history…",
-            justify="left",
-            font=("Segoe UI", 14),
-            text_color=MUTED,
-        )
-        self.history_status.pack(anchor="w", padx=24, pady=(6, 0))
-        self._update_history_status()
         self._side_button(sidebar, "▣   Dashboard", self.show_dashboard)
         self._side_button(sidebar, "↗   Scores Trend", self.open_score_trends)
         self._side_button(sidebar, "▤   Report", self.open_report_page)
@@ -194,6 +166,16 @@ class Dashboard(ctk.CTk):
         self._action_button(actions, "↓   Download issue reports", self.start_issue_reports_download)
         self._action_button(actions, "▣   Open reports folder", self.open_reports_folder)
         self._action_button(actions, "↑   Update score history", self.start_score_export)
+        self.history_status = ctk.CTkLabel(
+            actions,
+            text="Checking score history…",
+            justify="left",
+            wraplength=240,
+            font=("Segoe UI", 12),
+            text_color=MUTED,
+        )
+        self.history_status.pack(anchor="w", padx=20, pady=(7, 14))
+        self._update_history_status()
 
         activity = ctk.CTkFrame(body, fg_color=PANEL, corner_radius=14)
         activity.grid(row=2, column=0, columnspan=3, sticky="nsew", padx=7, pady=(15, 8))
@@ -286,6 +268,9 @@ class Dashboard(ctk.CTk):
     def _update_history_status(self) -> tuple[datetime | None, int]:
         """Show the most recent score-history update made this month."""
         saved_at, records = current_month_history_status()
+        if saved_at is not None:
+            # The workbook stores UTC; show the operator's local time.
+            saved_at = saved_at.replace(tzinfo=timezone.utc).astimezone()
         if saved_at is None:
             self.history_status.configure(
                 text="○  No score history saved\nthis month yet",
@@ -304,7 +289,7 @@ class Dashboard(ctk.CTk):
                 line = self.log_queue.get_nowait()
                 self.activity.configure(state="normal")
                 message = line.rstrip() + "\n"
-                is_failure = message.lstrip().startswith("✗") or " failed" in message.lower()
+                is_failure = message.lstrip().startswith("✗")
                 self.activity.insert("end", message, "failure" if is_failure else None)
                 self.activity.see("end")
                 self.activity.configure(state="disabled")
@@ -383,6 +368,7 @@ class Dashboard(ctk.CTk):
 
     def _current_cycle_label(self, companies: list[Company]) -> str:
         """Return the configured cycle name when the portfolio matches one."""
+        self.active_cycle = None
         current_domains = {company.domain.lower() for company in companies}
         for option in sorted(OPTION_VENDORS):
             if current_domains == {domain.lower() for domain in target_domains(option)}:
@@ -525,8 +511,9 @@ class Dashboard(ctk.CTk):
         def download() -> None:
             client, portfolio_id = self._client()
             companies = companies_from_payload(client.fetch_portfolio_companies(portfolio_id))
+            companies = companies_for_cycle_action(companies, self.active_cycle)
             if not companies:
-                self._log("• Portfolio is empty; no reports were downloaded.")
+                self._log("• No domains require reports for the active cycle.")
                 return
             output_dir = REPORTS_DIR / datetime.now(timezone.utc).strftime("%Y-%m-%d")
             saved = download_reports(client, companies, output_dir, (report_type,))
@@ -548,22 +535,29 @@ class Dashboard(ctk.CTk):
             self._log(f"✗ Could not open the reports folder: {exc}")
 
     def _latest_issue_report(self, company: Company) -> Path | None:
-        """Find the newest downloaded SecurityScorecard Issues CSV for a domain."""
-        safe_name = sanitize_filename(company.name)
-        marker = f" - {safe_name} - Issue Report - "
+        """Find the newest downloaded SecurityScorecard Issues CSV for a domain.
+
+        Companies sharing a display name are saved with the domain appended,
+        so that form is preferred over the plain company name.
+        """
+        markers = (
+            f" - {sanitize_filename(f'{company.name} ({company.domain})')} - Issue Report - ",
+            f" - {sanitize_filename(company.name)} - Issue Report - ",
+        )
         dated_folders = sorted(
             (folder for folder in REPORTS_DIR.iterdir() if folder.is_dir()),
             key=lambda folder: folder.name,
             reverse=True,
         ) if REPORTS_DIR.exists() else []
         for folder in dated_folders:
-            matches = sorted(
-                (path for path in (folder / "issues").glob("*.csv") if marker in path.name),
-                key=lambda path: path.stat().st_mtime,
-                reverse=True,
-            )
-            if matches:
-                return matches[0]
+            for marker in markers:
+                matches = sorted(
+                    (path for path in (folder / "issues").glob("*.csv") if marker in path.name),
+                    key=lambda path: path.stat().st_mtime,
+                    reverse=True,
+                )
+                if matches:
+                    return matches[0]
         return None
 
     def open_domain_details(self, company: Company) -> None:
@@ -681,12 +675,12 @@ class Dashboard(ctk.CTk):
         content = ctk.CTkFrame(self.trends_page, height=540, fg_color=PANEL, corner_radius=14)
         content.grid(row=3, column=0, sticky="nsew", padx=4, pady=(0, 8))
         content.grid_columnconfigure(0, weight=1)
-        mode = ctk.StringVar(value="All active domains")
+        mode = ctk.StringVar(value="Active")
         search_text = ctk.StringVar()
         grade_filter = ctk.StringVar(value="All grades")
         switcher = ctk.CTkSegmentedButton(
             content,
-            values=["All active domains", "All logged domains"],
+            values=["Active", "All"],
             variable=mode,
             width=330,
             font=("Segoe UI", 14),
@@ -754,7 +748,7 @@ class Dashboard(ctk.CTk):
                 ).grid(
                     row=0, column=column, sticky="ew", padx=12, pady=(10, 7)
                 )
-            if mode.get() == "All active domains":
+            if mode.get() == "Active":
                 rows = [
                     (company.domain, history_trends.get(company.domain.lower()))
                     for company in self.current_companies
@@ -800,7 +794,8 @@ class Dashboard(ctk.CTk):
 
         switcher.configure(command=render)
         grade_menu.configure(command=render)
-        search_text.trace_add("write", render)
+        # Variable traces pass (name, index, mode), which render() does not accept.
+        search_text.trace_add("write", lambda *_: render())
         render()
 
     @staticmethod
@@ -815,74 +810,57 @@ class Dashboard(ctk.CTk):
             return "D"
         return "F"
 
-    def _factor_heatmap_from_reports(
-        self,
-    ) -> tuple[list[str], dict[str, dict[str, float | None]], int]:
-        """Estimate factor exposure from the newest local Issues report per domain.
-
-        SecurityScorecard's CSV records issue-level score impact, not the
-        official factor score. Starting at 100 and applying those impacts makes
-        the local data scannable while keeping the distinction visible in UI.
-        """
-        factors = list(FACTOR_ORDER)
-        matrix: dict[str, dict[str, float | None]] = {
-            company.domain: {factor: None for factor in factors}
-            for company in self.current_companies
-        }
-        reports_found = 0
-        for company in self.current_companies:
-            issue_report = self._latest_issue_report(company)
-            if issue_report is None:
-                continue
-            reports_found += 1
-            scores: dict[str, float | None] = {factor: 100.0 for factor in factors}
-            try:
-                with open(issue_report, "r", encoding="utf-8-sig", newline="") as file:
-                    for issue in csv.DictReader(file):
-                        factor = (issue.get("FACTOR NAME") or "").strip()
-                        if not factor:
-                            continue
-                        if factor not in scores:
-                            factors.append(factor)
-                            scores[factor] = 100.0
-                        raw_impact = (issue.get("ISSUE TYPE SCORE IMPACT") or "").replace("<", "").strip()
-                        try:
-                            impact = float(raw_impact) if raw_impact else 0.0
-                        except ValueError:
-                            impact = 0.0
-                        scores[factor] = max(0.0, min(100.0, (scores[factor] or 100.0) + impact))
-            except (OSError, csv.Error):
-                continue
-            matrix[company.domain] = scores
-        for domain, scores in matrix.items():
-            for factor in factors:
-                scores.setdefault(factor, None)
-        return factors, matrix, reports_found
+    def _history_by_month(self) -> dict[str, list[Company]]:
+        """Read one latest score snapshot per domain for every workbook month."""
+        latest: dict[tuple[int, int, str], tuple[datetime, Company]] = {}
+        workbook = load_workbook(SCORE_HISTORY_PATH, read_only=True, data_only=True)
+        try:
+            for timestamp, domain, company_name, score, grade in workbook.active.iter_rows(
+                min_row=3, max_col=5, values_only=True
+            ):
+                if not isinstance(timestamp, datetime) or not domain:
+                    continue
+                try:
+                    numeric_score = float(score)
+                except (TypeError, ValueError):
+                    continue
+                domain_text = str(domain).strip().lower()
+                if not domain_text:
+                    continue
+                snapshot = timestamp.replace(tzinfo=None)
+                key = (snapshot.year, snapshot.month, domain_text)
+                record = Company(
+                    domain=domain_text,
+                    name=str(company_name or domain_text).strip(),
+                    grade=str(grade or self._grade_for_score(numeric_score)).upper(),
+                    score=numeric_score,
+                )
+                if key not in latest or snapshot > latest[key][0]:
+                    latest[key] = (snapshot, record)
+        finally:
+            workbook.close()
+        months: dict[str, list[Company]] = {}
+        for (year, month, _domain), (_timestamp, company) in latest.items():
+            label = datetime(year, month, 1).strftime("%B %Y")
+            months.setdefault(label, []).append(company)
+        return dict(sorted(months.items(), key=lambda item: datetime.strptime(item[0], "%B %Y"), reverse=True))
 
     def open_report_page(self) -> None:
-        """Build the Report view from the latest downloaded issue reports."""
+        """Load score-history snapshots and open the monthly Report page."""
         if self.busy:
-            return
-        if not self.current_companies:
-            self._log("• Refresh the portfolio before opening the report.")
             return
 
         def build_report() -> None:
-            factors, matrix, reports_found = self._factor_heatmap_from_reports()
-            self.after(0, lambda: self._show_report_page(factors, matrix, reports_found))
-            self._log(
-                f"✓ Report heatmap prepared from {reports_found} latest Issues report(s)."
-            )
+            snapshots = self._history_by_month()
+            if not snapshots:
+                raise ValueError("No monthly score snapshots are available in the score-history workbook.")
+            self.after(0, lambda: self._show_report_page(snapshots))
+            self._log(f"✓ Report loaded with {len(snapshots)} month(s) from {SCORE_HISTORY_PATH.name}.")
 
-        self._run("Building report heatmap", build_report, show_loading_overlay=False)
+        self._run("Loading report history", build_report, show_loading_overlay=False)
 
-    def _show_report_page(
-        self,
-        factors: list[str],
-        matrix: dict[str, dict[str, float | None]],
-        reports_found: int,
-    ) -> None:
-        """Render the executive-style factor-by-domain heatmap."""
+    def _show_report_page(self, snapshots: dict[str, list[Company]]) -> None:
+        """Render the workbook-backed monthly grade heatmap."""
         if self.trends_page is not None:
             self.trends_page.destroy()
             self.trends_page = None
@@ -891,81 +869,64 @@ class Dashboard(ctk.CTk):
         self.dashboard_header.grid_remove()
         self.dashboard_body.grid_remove()
 
-        self.report_page = ctk.CTkFrame(self, fg_color=BACKGROUND, corner_radius=0)
+        self.report_page = ctk.CTkScrollableFrame(self, fg_color=BACKGROUND, corner_radius=0)
         self.report_page.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(31, 23), pady=(0, 20))
         self.report_page.grid_columnconfigure(0, weight=1)
-        self.report_page.grid_rowconfigure(3, weight=1)
         ctk.CTkButton(
             self.report_page, text="←  Dashboard", command=self.show_dashboard,
             width=170, height=32, fg_color="transparent", hover_color=PANEL_ALT,
             anchor="w", font=("Segoe UI", 14),
         ).grid(row=0, column=0, sticky="w", padx=4, pady=(22, 0))
-        ctk.CTkLabel(self.report_page, text="Report", font=("Segoe UI", 25, "bold")).grid(
-            row=1, column=0, sticky="w", padx=4, pady=(13, 0)
+        heading = ctk.CTkFrame(self.report_page, fg_color="transparent")
+        heading.grid(row=1, column=0, sticky="ew", padx=4, pady=(13, 11))
+        heading.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(heading, text="Report", font=("Segoe UI", 25, "bold")).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(heading, text="View score distribution", font=("Segoe UI", 13), text_color=MUTED).grid(row=1, column=0, sticky="w", pady=(1, 0))
+        period = ctk.StringVar(value=next(iter(snapshots)))
+        selector = ctk.CTkOptionMenu(
+            heading, values=list(snapshots), variable=period, width=180,
+            font=("Segoe UI", 13), dropdown_font=("Segoe UI", 13),
         )
-        ctk.CTkLabel(
-            self.report_page,
-            text=(
-                "Factor exposure heatmap • newest downloaded Issues report per domain • "
-                f"{reports_found} of {len(self.current_companies)} active domains covered"
-            ),
-            font=("Segoe UI", 13), text_color=MUTED,
-        ).grid(row=2, column=0, sticky="w", padx=4, pady=(2, 12))
+        selector.grid(row=0, column=1, rowspan=2, sticky="e")
 
         content = ctk.CTkFrame(self.report_page, fg_color=PANEL, corner_radius=14)
-        content.grid(row=3, column=0, sticky="nsew", padx=4, pady=(0, 8))
-        content.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(
-            content,
-            text="Factor exposure by domain",
-            font=("Segoe UI", 17, "bold"),
-        ).grid(row=0, column=0, sticky="w", padx=20, pady=(17, 1))
-        ctk.CTkLabel(
-            content,
-            text="Estimated from Issue Report score impacts. 100 means no recorded score impact; — means no downloaded report.",
-            font=("Segoe UI", 12), text_color=MUTED,
-        ).grid(row=1, column=0, sticky="w", padx=20)
-        legend = ctk.CTkFrame(content, fg_color="transparent")
-        legend.grid(row=2, column=0, sticky="w", padx=20, pady=(10, 8))
-        for index, grade in enumerate(("A", "B", "C", "D", "F")):
-            background, foreground = HEATMAP_COLORS[grade]
+        content.grid(row=3, column=0, sticky="ew", padx=4, pady=(0, 8))
+        content.grid_columnconfigure((0, 1, 2, 3, 4), weight=1, uniform="grades")
+        for column, grade in enumerate(("A", "B", "C", "D", "F")):
+            label, background, foreground = REPORT_GRADE_STYLES[grade]
             ctk.CTkLabel(
-                legend, text=f" {grade}  { {'A': '90–100', 'B': '80–89', 'C': '70–79', 'D': '60–69', 'F': '<60'}[grade]} ",
-                fg_color=background, text_color=foreground, corner_radius=7,
-                font=("Segoe UI", 11, "bold"),
-            ).grid(row=0, column=index, padx=(0, 6))
+                content, text=label, height=52, fg_color=background, text_color=foreground,
+                font=("Segoe UI", 14, "bold"), corner_radius=0,
+            ).grid(row=0, column=column, sticky="ew", padx=(1 if column else 0, 0), pady=0)
+        groups = [ctk.CTkFrame(content, fg_color="#0E1821", corner_radius=0) for _ in range(5)]
+        for column, group in enumerate(groups):
+            group.grid(row=1, column=column, sticky="nsew", padx=(1 if column else 0, 0), pady=(1, 0))
+            group.grid_columnconfigure(0, weight=1)
 
-        table = ctk.CTkScrollableFrame(content, fg_color="#0E1821", corner_radius=9)
-        table.grid(row=3, column=0, sticky="nsew", padx=20, pady=(0, 20))
-        content.grid_rowconfigure(3, weight=1)
-        table.grid_columnconfigure(0, minsize=175, weight=1)
-        ctk.CTkLabel(
-            table, text="DOMAIN", anchor="w", font=("Segoe UI", 11, "bold"), text_color=MUTED,
-        ).grid(row=0, column=0, sticky="ew", padx=(9, 4), pady=(10, 6))
-        for column, factor in enumerate(factors, start=1):
-            table.grid_columnconfigure(column, minsize=58)
-            ctk.CTkLabel(
-                table, text=FACTOR_SHORT_NAMES.get(factor, factor), width=58,
-                wraplength=54, justify="center", font=("Segoe UI", 10, "bold"), text_color=MUTED,
-            ).grid(row=0, column=column, padx=2, pady=(8, 6))
-        for row, company in enumerate(sorted(self.current_companies, key=lambda item: item.domain.lower()), start=1):
-            company_score = "—" if company.score is None else f"{company.score:.0f}"
-            ctk.CTkLabel(
-                table, text=f"{company.domain}\n{company_score}  •  Grade {company.grade or '—'}",
-                anchor="w", justify="left", font=("Segoe UI", 12, "bold"), text_color="#D5E0E6",
-            ).grid(row=row, column=0, sticky="ew", padx=(9, 4), pady=3)
-            for column, factor in enumerate(factors, start=1):
-                score = matrix.get(company.domain, {}).get(factor)
-                if score is None:
-                    background, foreground = HEATMAP_COLORS["unknown"]
-                    text = "—"
-                else:
-                    background, foreground = HEATMAP_COLORS[self._grade_for_score(score)]
-                    text = f"{score:.0f}"
-                ctk.CTkLabel(
-                    table, text=text, width=58, height=36, corner_radius=7,
-                    fg_color=background, text_color=foreground, font=("Segoe UI", 12, "bold"),
-                ).grid(row=row, column=column, padx=2, pady=3)
+        def render_month(_selection: str = "") -> None:
+            grouped = {grade: [] for grade in REPORT_GRADE_STYLES}
+            for company in sorted(snapshots[period.get()], key=lambda item: item.domain.lower()):
+                grouped[company.grade if company.grade in grouped else self._grade_for_score(float(company.score or 0))].append(company)
+            for index, grade in enumerate(("A", "B", "C", "D", "F")):
+                group = groups[index]
+                for widget in group.winfo_children():
+                    widget.destroy()
+                members = grouped[grade]
+                if not members:
+                    ctk.CTkLabel(group, text="Tidak ada domain", font=("Segoe UI", 12, "italic"), text_color=MUTED).grid(
+                        row=0, column=0, sticky="w", padx=15, pady=17
+                    )
+                    continue
+                for row, company in enumerate(members):
+                    ctk.CTkLabel(
+                        group, text=company.domain, anchor="w", height=24,
+                        font=("Segoe UI", 13, "bold"), text_color="#5E9BFF",
+                    ).grid(
+                        row=row, column=0, sticky="ew", padx=15, pady=(7 if row == 0 else 2, 0)
+                    )
+
+        selector.configure(command=render_month)
+        render_month()
 
     def show_dashboard(self) -> None:
         """Return from an in-window page to the main dashboard."""
@@ -991,10 +952,16 @@ class Dashboard(ctk.CTk):
         def export() -> None:
             client, portfolio_id = self._client()
             portfolio_entries = client.fetch_portfolio_companies(portfolio_id)
+            selected_domains = {
+                company.domain
+                for company in companies_for_cycle_action(
+                    companies_from_payload(portfolio_entries), self.active_cycle
+                )
+            }
             companies: list[Company] = []
             for item in portfolio_entries:
                 domain = str(item.get("domain") or item.get("website") or "").strip()
-                if not domain:
+                if not domain or normalize_domain(domain) not in selected_domains:
                     continue
                 details = client.get_company(domain)
                 companies.append(
@@ -1005,9 +972,10 @@ class Dashboard(ctk.CTk):
                         details.get("score"),
                     )
                 )
-            appended = append_score_history(companies, "Live portfolio")
+            appended = append_score_history(companies, self.active_cycle or "Live portfolio")
             self.after(0, self._update_history_status)
-            self._log(f"✓ Added {appended} live portfolio score records to {SCORE_HISTORY_PATH}.")
+            scope = "for the live portfolio" if self.active_cycle in (None, 1) else "excluding pinned domains"
+            self._log(f"✓ Added {appended} score records {scope} to {SCORE_HISTORY_PATH}.")
         self._run("Updating live portfolio score history", export)
 
 

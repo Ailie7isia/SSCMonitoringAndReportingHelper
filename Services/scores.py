@@ -2,9 +2,10 @@ from __future__ import annotations
 
 # -----------------------------------------------------------------------------
 # This file retrieves company scores from the SecurityScorecard portfolio,
-# displays a summary, and exports the results to a JSON file.
+# displays a summary, and appends the results to the Excel score history.
 # -----------------------------------------------------------------------------
 
+import zipfile
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -13,13 +14,16 @@ from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
+from openpyxl.utils.exceptions import InvalidFileException
 
+from config import PROJECT_DIR
 from models import Company
 
-DEFAULT_SCORE_HISTORY_PATH = (
-    r"C:\Users\ailie\.cursor\projects\SSCMonitoringAndReportingHelper\SSC Helper Log.xlsx"
-)
+DEFAULT_SCORE_HISTORY_PATH = PROJECT_DIR / "SSC Helper Log.xlsx"
 SCORE_HISTORY_PATH = Path(environ.get("SSC_SCORE_HISTORY_PATH", DEFAULT_SCORE_HISTORY_PATH))
+# A missing, locked, corrupt, or half-synced workbook is treated as no history
+# so read-only views (including dashboard start-up) never crash.
+UNREADABLE_WORKBOOK_ERRORS = (OSError, ValueError, KeyError, zipfile.BadZipFile, InvalidFileException)
 HISTORY_HEADERS = ["Retrieved (UTC)", "Domain", "Company", "Score", "Grade", "Cycle"]
 GRADE_FILLS = {
     "A": "35C98A",
@@ -28,14 +32,6 @@ GRADE_FILLS = {
     "D": "EE5D69",
     "F": "C93546",
 }
-
-
-@dataclass(frozen=True, slots=True)
-class ScoreTrend:
-    """Current score movement compared with the closest prior observations."""
-
-    month_over_month: float | None
-    year_over_year: float | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,8 +49,7 @@ def score_trends_from_history(
 ) -> dict[str, HistoricalScoreTrend]:
     """Return trends for every domain recorded in the score-history workbook.
 
-    Unlike :func:`score_trends_for_companies`, this does not require a domain
-    to still be in the live portfolio. Scores are based on the newest saved
+    A domain does not need to still be in the live portfolio. Scores are based on the newest saved
     entry in each calendar month. A missing current-month entry remains empty.
     """
     if not history_file.exists():
@@ -83,7 +78,7 @@ def score_trends_from_history(
             if domain:
                 observations.setdefault(domain, []).append((timestamp.replace(tzinfo=None), numeric_score))
         workbook.close()
-    except (OSError, ValueError):
+    except UNREADABLE_WORKBOOK_ERRORS:
         return {}
 
     trends: dict[str, HistoricalScoreTrend] = {}
@@ -116,70 +111,6 @@ def score_trends_from_history(
     return trends
 
 
-def score_trends_for_companies(
-    companies: list[Company],
-    history_file: Path = SCORE_HISTORY_PATH,
-) -> dict[str, ScoreTrend]:
-    """Return 30-day and 365-day score changes for the active portfolio.
-
-    The history workbook is read once, which keeps the trends view responsive
-    even when the portfolio contains many domains.
-    """
-    current_scores = {
-        company.domain.lower(): float(company.score)
-        for company in companies
-        if company.score is not None
-    }
-    if not current_scores or not history_file.exists():
-        return {domain: ScoreTrend(None, None) for domain in current_scores}
-
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    cutoffs = {"month": now - timedelta(days=30), "year": now - timedelta(days=365)}
-    baselines: dict[str, dict[str, tuple[datetime, float] | None]] = {
-        domain: {period: None for period in cutoffs}
-        for domain in current_scores
-    }
-    try:
-        workbook = load_workbook(history_file, read_only=True, data_only=True)
-        worksheet = workbook.active
-        for timestamp, logged_domain, _name, score, _grade in worksheet.iter_rows(
-            min_row=1,
-            max_col=5,
-            values_only=True,
-        ):
-            domain = str(logged_domain).lower()
-            if domain not in baselines or not isinstance(timestamp, datetime):
-                continue
-            timestamp = timestamp.replace(tzinfo=None)
-            try:
-                numeric_score = float(score)
-            except (TypeError, ValueError):
-                continue
-            for period, cutoff in cutoffs.items():
-                baseline = baselines[domain][period]
-                if timestamp <= cutoff and (baseline is None or timestamp > baseline[0]):
-                    baselines[domain][period] = (timestamp, numeric_score)
-        workbook.close()
-    except (OSError, ValueError):
-        return {domain: ScoreTrend(None, None) for domain in current_scores}
-
-    return {
-        domain: ScoreTrend(
-            month_over_month=(
-                current_scores[domain] - baselines[domain]["month"][1]
-                if baselines[domain]["month"] is not None
-                else None
-            ),
-            year_over_year=(
-                current_scores[domain] - baselines[domain]["year"][1]
-                if baselines[domain]["year"] is not None
-                else None
-            ),
-        )
-        for domain in current_scores
-    }
-
-
 def score_change_over_past_month(
     domain: str,
     current_score: int | float | None,
@@ -207,7 +138,7 @@ def score_change_over_past_month(
             if timestamp <= cutoff and (baseline is None or timestamp > baseline[0]):
                 baseline = (timestamp, numeric_score)
         workbook.close()
-    except (OSError, ValueError):
+    except UNREADABLE_WORKBOOK_ERRORS:
         return None
     if baseline is None:
         return None
@@ -312,7 +243,7 @@ def current_month_history_status(
                 if newest is None or timestamp > newest:
                     newest = timestamp
         workbook.close()
-    except (OSError, ValueError):
+    except UNREADABLE_WORKBOOK_ERRORS:
         return None, 0
     return newest, count
 
@@ -327,17 +258,3 @@ def grade_statistics(
     )
 
     return dict(counts)
-
-# Print a summary of the portfolio score distribution.
-def print_statistics(companies: list[Company]) -> None:
-    stats = grade_statistics(companies)
-
-    print("========== GRADE SUMMARY ==========\n")
-
-    total = sum(stats.values())
-
-    for grade in ["A", "B", "C", "D", "F", "Unknown"]:
-        if grade in stats:
-            print(f"{grade:>7}: {stats[grade]}")
-
-    print(f"\nTotal : {total}\n")
