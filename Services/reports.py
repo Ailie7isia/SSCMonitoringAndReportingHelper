@@ -6,32 +6,25 @@ import logging
 import time
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
-from typing import Callable, TypeVar
 
 from models import Company
+from Services.rate_limit import RequestPacer, StatusCallback
 from ssc_client import RateLimitError, SecurityScorecardClient
-from utils import format_duration, make_filename, sanitize_filename
+from utils import make_filename, sanitize_filename
 
 
 REPORT_TYPES = ("detailed_report", "issue_report")
 
-# SecurityScorecard allows 5,000 requests per rolling hour, and
-# POST /reports/detailed has a stricter, undisclosed per-endpoint limit.
-# Requests are sent one at a time: parallel requests only reach it sooner.
-RATE_LIMIT_RETRIES = 5
-# Used only when a 429 response does not say how long to wait.
-FALLBACK_RATE_LIMIT_WAITS = (60, 120, 300, 600, 900)
-MAX_RATE_LIMIT_WAIT = 65 * 60
+# Pacing is tracked per endpoint: SecurityScorecard limits POST /reports/detailed
+# more strictly than everything else, and a limit there should not slow the rest.
+REPORT_ENDPOINTS = {"detailed_report": "reports/detailed", "issue_report": "reports/issues"}
+
 # Reports take minutes to generate and every status check downloads the whole
 # recent-reports list, so checks start slow and back off.
 POLL_INTERVALS = (15, 20, 30, 45, 60)
-
-# Called with the local time requests will resume, then with None once waiting ends.
-RateLimitCallback = Callable[[datetime | None], None]
-T = TypeVar("T")
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,57 +35,6 @@ class PendingReport:
     company: Company
     report_type: str
     extension: str
-
-
-def _wait_for_quota(
-    seconds: float,
-    activity: str,
-    *,
-    estimated: bool,
-    limit: str | None,
-    on_rate_limit: RateLimitCallback | None,
-) -> None:
-    seconds = min(max(seconds, 1), MAX_RATE_LIMIT_WAIT)
-    resume_at = datetime.now().astimezone() + timedelta(seconds=seconds)
-    logging.warning(
-        "SecurityScorecard request limit reached while %s%s. Waiting %s until %s (%s).",
-        activity,
-        f" (limit: {limit})" if limit else "",
-        format_duration(seconds),
-        f"{resume_at:%H:%M:%S}",
-        "estimated; SecurityScorecard did not say when the quota resets"
-        if estimated
-        else "reset time from SecurityScorecard",
-    )
-    if on_rate_limit:
-        on_rate_limit(resume_at)
-    try:
-        time.sleep(seconds)
-    finally:
-        if on_rate_limit:
-            on_rate_limit(None)
-
-
-def _with_rate_limit(
-    action: Callable[[], T],
-    activity: str,
-    on_rate_limit: RateLimitCallback | None,
-) -> T:
-    """Run an API call, waiting out SecurityScorecard rate limits instead of failing."""
-    for attempt in range(RATE_LIMIT_RETRIES + 1):
-        try:
-            return action()
-        except RateLimitError as exc:
-            if attempt == RATE_LIMIT_RETRIES:
-                raise
-            estimated = exc.retry_after is None
-            wait = (
-                FALLBACK_RATE_LIMIT_WAITS[min(attempt, len(FALLBACK_RATE_LIMIT_WAITS) - 1)]
-                if estimated
-                else exc.retry_after
-            )
-            _wait_for_quota(wait, activity, estimated=estimated, limit=exc.limit, on_rate_limit=on_rate_limit)
-    raise AssertionError("unreachable")
 
 
 def _request_single(
@@ -112,21 +54,29 @@ def _request_single(
     return PendingReport(receipt_id, company, report_type, extension)
 
 
+def _request_report(pacer: RequestPacer, client: SecurityScorecardClient, company: Company, report_type: str) -> PendingReport:
+    return pacer.run(
+        REPORT_ENDPOINTS[report_type],
+        partial(_request_single, client, company, report_type),
+        f"requesting {report_type} for {company.domain}",
+    )
+
+
 def _request_new_reports(
     client: SecurityScorecardClient,
     companies: list[Company],
     report_types: tuple[str, ...],
-    on_rate_limit: RateLimitCallback | None,
+    pacer: RequestPacer,
 ) -> list[PendingReport]:
     """Request the selected report types; never reuse a report from a prior run."""
     pending: list[PendingReport] = []
     total = len(companies)
     for index, original in enumerate(companies, start=1):
         try:
-            details = _with_rate_limit(
+            details = pacer.run(
+                "companies",
                 partial(client.get_company, original.domain),
                 f"checking {original.domain}",
-                on_rate_limit,
             )
         except Exception as exc:
             logging.error(
@@ -154,13 +104,7 @@ def _request_new_reports(
         )
         for report_type in report_types:
             try:
-                pending.append(
-                    _with_rate_limit(
-                        partial(_request_single, client, company, report_type),
-                        f"requesting {report_type} for {company.domain}",
-                        on_rate_limit,
-                    )
-                )
+                pending.append(_request_report(pacer, client, company, report_type))
                 logging.info(
                     "[%d/%d] Requested %s for %s",
                     index,
@@ -183,9 +127,9 @@ def _request_new_reports(
 def _wait_for_current_batch(
     client: SecurityScorecardClient,
     pending: list[PendingReport],
+    pacer: RequestPacer,
     *,
     timeout: int = 3600,
-    on_rate_limit: RateLimitCallback | None = None,
 ) -> dict[str, dict]:
     """Wait only for receipts created by this run, excluding prior-month files."""
     wanted = {item.receipt_id for item in pending}
@@ -203,7 +147,7 @@ def _wait_for_current_batch(
         time.sleep(interval)
         checks += 1
         try:
-            recent = _with_rate_limit(client.list_recent_reports, "checking report status", on_rate_limit)
+            recent = pacer.run("reports/recent", client.list_recent_reports, "checking report status")
         except Exception as exc:
             # A transient API error must not discard a batch that may have
             # been generating for many minutes; keep polling until timeout.
@@ -269,12 +213,12 @@ def _download_valid(
     client: SecurityScorecardClient,
     item: PendingReport,
     report: dict,
-    on_rate_limit: RateLimitCallback | None,
+    pacer: RequestPacer,
 ) -> bytes:
-    content = _with_rate_limit(
+    content = pacer.run(
+        "download",
         partial(client.download_report, str(report["download_url"])),
         f"downloading {item.report_type} for {item.company.domain}",
-        on_rate_limit,
     )
     _validate_download(content, item.extension, item.company.domain)
     return content
@@ -286,7 +230,7 @@ def _save_report(
     report: dict,
     output_dir: Path,
     label: str,
-    on_rate_limit: RateLimitCallback | None,
+    pacer: RequestPacer,
 ) -> Path:
     """Save a finished report, downloading it again and then regenerating it if invalid.
 
@@ -294,7 +238,7 @@ def _save_report(
     against SecurityScorecard's stricter report-generation limit.
     """
     try:
-        content = _download_valid(client, item, report, on_rate_limit)
+        content = _download_valid(client, item, report, pacer)
     except RateLimitError:
         raise
     except Exception as exc:
@@ -305,7 +249,7 @@ def _save_report(
             exc,
         )
         try:
-            content = _download_valid(client, item, report, on_rate_limit)
+            content = _download_valid(client, item, report, pacer)
         except RateLimitError:
             raise
         except Exception as second_exc:
@@ -315,21 +259,17 @@ def _save_report(
                 item.report_type,
                 second_exc,
             )
-            replacement = _with_rate_limit(
-                partial(_request_single, client, item.company, item.report_type),
-                f"requesting a replacement {item.report_type} for {item.company.domain}",
-                on_rate_limit,
-            )
+            replacement = _request_report(pacer, client, item.company, item.report_type)
             replacement_report = _wait_for_current_batch(
                 client,
                 [replacement],
+                pacer,
                 timeout=600,
-                on_rate_limit=on_rate_limit,
             ).get(replacement.receipt_id)
             if replacement_report is None:
                 raise TimeoutError("replacement report was not ready within 10 minutes") from second_exc
             item = replacement
-            content = _download_valid(client, replacement, replacement_report, on_rate_limit)
+            content = _download_valid(client, replacement, replacement_report, pacer)
 
     destination = _destination(output_dir, item, label)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -345,14 +285,14 @@ def download_reports(
     output_dir: Path,
     report_types: tuple[str, ...] = REPORT_TYPES,
     *,
-    on_rate_limit: RateLimitCallback | None = None,
+    on_status: StatusCallback | None = None,
 ) -> list[Path]:
     """Generate selected report types, then save valid files only.
 
     Every file is tied to a receipt returned during this invocation, preventing
     a stale report from a previous month from being downloaded by mistake.
-    When SecurityScorecard rate-limits a request, the batch waits for the
-    quota to reset and ``on_rate_limit`` receives the expected resume time.
+    Requests are paced and rate limits waited out by one shared RequestPacer;
+    ``on_status`` receives its state for the rate-limit timer.
     """
     if not companies:
         return []
@@ -363,37 +303,47 @@ def download_reports(
         return []
     output_dir.mkdir(parents=True, exist_ok=True)
     labels = _file_labels(companies)
+    pacer = RequestPacer(
+        # Looked up on each call so tests can patch the time module.
+        sleep=lambda seconds: time.sleep(seconds),
+        clock=lambda: time.monotonic(),
+        on_status=on_status,
+    )
     logging.info(
         "Requesting fresh %s reports for %d companies…",
         ", ".join(report_types),
         len(companies),
     )
-    pending = _request_new_reports(client, companies, report_types, on_rate_limit)
-    if not pending:
-        return []
-    completed = _wait_for_current_batch(client, pending, on_rate_limit=on_rate_limit)
     saved: list[Path] = []
-    for item in pending:
-        report = completed.get(item.receipt_id)
-        if report is None:
-            logging.error("[%s] %s was not ready before timeout.", item.company.domain, item.report_type)
-            continue
-        label = labels.get(item.company.domain, item.company.name)
-        try:
-            destination = _save_report(client, item, report, output_dir, label, on_rate_limit)
-        except Exception as exc:
-            logging.error(
-                "[%s] Failed downloading %s: %s",
-                item.company.domain,
-                item.report_type,
-                exc,
-            )
-            continue
-        saved.append(destination)
-        logging.info("[%s] Saved %s", item.company.domain, destination.name)
-    logging.info(
-        "Finished downloading %d/%d newly generated reports.",
-        len(saved),
-        len(pending),
-    )
+    pending: list[PendingReport] = []
+    try:
+        pending = _request_new_reports(client, companies, report_types, pacer)
+        if not pending:
+            return []
+        completed = _wait_for_current_batch(client, pending, pacer)
+        for item in pending:
+            report = completed.get(item.receipt_id)
+            if report is None:
+                logging.error("[%s] %s was not ready before timeout.", item.company.domain, item.report_type)
+                continue
+            label = labels.get(item.company.domain, item.company.name)
+            try:
+                destination = _save_report(client, item, report, output_dir, label, pacer)
+            except Exception as exc:
+                logging.error(
+                    "[%s] Failed downloading %s: %s",
+                    item.company.domain,
+                    item.report_type,
+                    exc,
+                )
+                continue
+            saved.append(destination)
+            logging.info("[%s] Saved %s", item.company.domain, destination.name)
+        logging.info(
+            "Finished downloading %d/%d newly generated reports.",
+            len(saved),
+            len(pending),
+        )
+    finally:
+        logging.info(pacer.finish())
     return sorted(saved, key=lambda path: str(path).lower())

@@ -34,6 +34,7 @@ from Services.scores import (
     score_change_over_past_month,
     score_trends_from_history,
 )
+from Services.rate_limit import RateLimitStatus
 from ssc_client import ApiRequestError, RateLimitError, SecurityScorecardClient
 from utils import format_duration, normalize_domain, sanitize_filename
 
@@ -80,6 +81,10 @@ class Dashboard(ctk.CTk):
         self.report_page: ctk.CTkFrame | None = None
         self._rate_limit_resume_at: datetime | None = None
         self._rate_limit_job: str | None = None
+        self._rate_limit_state: RateLimitStatus | None = None
+        # True while a report download's pacer drives the timer; False for a
+        # one-off countdown after some other request was rate-limited.
+        self._rate_limit_live = False
         self._build_layout()
         self._build_loading_overlay()
         self.after(150, self._poll_log_queue)
@@ -106,7 +111,9 @@ class Dashboard(ctk.CTk):
             text_color=ACCENT,
         )
         self.sidebar_status.pack(side="bottom", anchor="w", fill="x", padx=24, pady=22)
-        # Shown above the status only while SecurityScorecard's request quota is exhausted.
+        # Rate-limit timer, shown above the status: live during a report download
+        # (pacing, waiting out a limit, request counts), and as a countdown after
+        # any other request is rate-limited.
         self.rate_limit_status = ctk.CTkLabel(
             sidebar,
             text="",
@@ -277,26 +284,72 @@ class Dashboard(ctk.CTk):
         self.log_queue.put(text)
 
     def _show_rate_limit_countdown(self, resume_at: datetime | None) -> None:
-        """Show when SecurityScorecard's request quota is expected to reset."""
+        """Count down to a quota reset after a request outside a report download was limited."""
+        status = None
+        if resume_at is not None:
+            status = RateLimitStatus(
+                state="cooling",
+                endpoint=None,
+                resume_at=resume_at,
+                spacing=0.0,
+                requests=0,
+                rate_limited=1,
+                waited_on_limits=0.0,
+                waited_on_pacing=0.0,
+            )
+        self._show_rate_limit_status(status, live=False)
+
+    def _show_rate_limit_status(self, status: RateLimitStatus | None, *, live: bool = True) -> None:
+        """Drive the sidebar rate-limit timer; a finished or missing status hides it."""
         if self._rate_limit_job is not None:
             self.after_cancel(self._rate_limit_job)
             self._rate_limit_job = None
-        self._rate_limit_resume_at = resume_at
-        self._tick_rate_limit_countdown()
+        if status is not None and status.state == "finished":
+            status = None
+        self._rate_limit_state = status
+        self._rate_limit_live = live
+        self._rate_limit_resume_at = status.resume_at if status else None
+        self._tick_rate_limit_status()
 
-    def _tick_rate_limit_countdown(self) -> None:
-        resume_at = self._rate_limit_resume_at
-        remaining = (resume_at - datetime.now().astimezone()).total_seconds() if resume_at else 0
-        if remaining <= 0:
+    @staticmethod
+    def _rate_limit_text(status: RateLimitStatus | None, now: datetime, live: bool) -> str | None:
+        """Timer text for ``status`` at ``now``, or None when there is nothing to show."""
+        if status is None:
+            return None
+        remaining = (status.resume_at - now).total_seconds() if status.resume_at else 0
+        if not live and remaining <= 0:
+            return None
+        if status.state == "cooling" and remaining > 0:
+            lines = [
+                "⏳  SSC request limit reached",
+                f"Resumes in {format_duration(remaining)} (at {status.resume_at:%H:%M:%S})",
+            ]
+            if status.estimated:
+                lines.append("Estimated: SSC gave no reset time")
+        elif status.state == "pacing" and remaining > 0:
+            lines = ["⏱  Pacing report requests", f"Next request in {format_duration(remaining)}"]
+        else:
+            lines = ["⏱  SSC requests in progress"]
+        if live:
+            gap = f" · gap {status.spacing:.0f}s" if status.spacing else ""
+            lines.append(f"{status.requests} sent · {status.rate_limited} limited{gap}")
+        return "\n".join(lines)
+
+    def _tick_rate_limit_status(self) -> None:
+        status = self._rate_limit_state
+        text = self._rate_limit_text(status, datetime.now().astimezone(), self._rate_limit_live)
+        if text is None:
+            self._rate_limit_state = None
             self._rate_limit_resume_at = None
             self._rate_limit_job = None
             self.rate_limit_status.pack_forget()
             return
         self.rate_limit_status.configure(
-            text=f"⏳  SSC request limit reached\nResumes in {format_duration(remaining)} (at {resume_at:%H:%M:%S})"
+            text=text,
+            text_color="#F2B84B" if text.startswith("⏳") else MUTED,
         )
         self.rate_limit_status.pack(side="bottom", anchor="w", fill="x", padx=24, pady=(0, 2))
-        self._rate_limit_job = self.after(1000, self._tick_rate_limit_countdown)
+        self._rate_limit_job = self.after(1000, self._tick_rate_limit_status)
 
     def _report_rate_limit(self, exc: RateLimitError) -> None:
         """Log a rate-limited operation and start the countdown when the reset time is known."""
@@ -571,7 +624,7 @@ class Dashboard(ctk.CTk):
                 companies,
                 output_dir,
                 (report_type,),
-                on_rate_limit=lambda resume_at: self.after(0, lambda: self._show_rate_limit_countdown(resume_at)),
+                on_status=lambda status: self.after(0, lambda: self._show_rate_limit_status(status)),
             )
             self._log(f"✓ Downloaded {len(saved)} of {len(companies)} {report_label} to {output_dir}.")
         # Report generation can take a while. The service logs each request,

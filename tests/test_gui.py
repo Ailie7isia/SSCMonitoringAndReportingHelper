@@ -16,6 +16,7 @@ from tests.test_scores import write_history
 from models import Company
 from Services.portfolio import target_domains
 from Services.scores import HistoricalScoreTrend
+from Services.rate_limit import RateLimitStatus
 from ssc_client import RateLimitError
 
 try:
@@ -142,6 +143,63 @@ class DashboardTest(unittest.TestCase):
         remaining = (self.app._rate_limit_resume_at - datetime.now().astimezone()).total_seconds()
         self.assertAlmostEqual(remaining, 120, delta=5)
         self.assertEqual(self.app.rate_limit_status.winfo_manager(), "pack")
+
+    def status(self, state="running", seconds=0, **overrides):
+        values = dict(
+            state=state,
+            endpoint="reports/detailed",
+            resume_at=datetime.now().astimezone() + timedelta(seconds=seconds) if seconds else None,
+            spacing=3.0,
+            requests=12,
+            rate_limited=1,
+            waited_on_limits=42.0,
+            waited_on_pacing=9.0,
+        )
+        values.update(overrides)
+        return RateLimitStatus(**values)
+
+    def test_download_timer_counts_down_the_gap_and_shows_request_counts(self):
+        self.addCleanup(self.app._show_rate_limit_status, None)
+        self.app._show_rate_limit_status(self.status("pacing", seconds=5))
+        text = self.app.rate_limit_status.cget("text")
+        self.assertRegex(text, r"Next request in 0:0[45]")
+        self.assertIn("12 sent · 1 limited · gap 3s", text)
+        self.assertEqual(self.app.rate_limit_status.winfo_manager(), "pack")
+
+    def test_download_timer_counts_down_a_limit(self):
+        self.addCleanup(self.app._show_rate_limit_status, None)
+        self.app._show_rate_limit_status(self.status("cooling", seconds=90, estimated=True))
+        text = self.app.rate_limit_status.cget("text")
+        self.assertRegex(text, r"Resumes in 1:(29|30) \(at \d\d:\d\d:\d\d\)")
+        self.assertIn("Estimated", text)
+
+    def test_download_timer_stays_between_waits_and_hides_when_finished(self):
+        self.app._show_rate_limit_status(self.status("running"))
+        self.assertIn("12 sent · 1 limited", self.app.rate_limit_status.cget("text"))
+        self.assertEqual(self.app.rate_limit_status.winfo_manager(), "pack")
+        self.app._show_rate_limit_status(self.status("finished"))
+        self.assertEqual(self.app.rate_limit_status.winfo_manager(), "")
+
+    def test_download_passes_pacer_status_to_the_timer(self):
+        client = FakeClient(
+            portfolio=[{"domain": "kalbe.co.id", "name": "Kalbe Farma"}],
+            scores={"kalbe.co.id": (92, "A")},
+        )
+        client.create_rate_limits = 1
+        client.rate_limit_retry_after = 30
+        shown = []
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(self.app, "_client", return_value=(client, "p1")), \
+                mock.patch.object(gui, "REPORTS_DIR", Path(tmp)), \
+                mock.patch.object(gui.threading, "Thread", InlineThread), \
+                mock.patch("Services.reports.time.sleep"), \
+                mock.patch.object(self.app, "_show_rate_limit_status", side_effect=shown.append):
+            self.app.active_cycle = None
+            self.app._start_reports_download("detailed_report", "Detailed PDF reports")
+            self.wait_until_idle()
+        states = [status.state for status in shown if status is not None]
+        self.assertIn("cooling", states)
+        self.assertEqual(states[-1], "finished")
 
     # Pages -------------------------------------------------------------------------
 

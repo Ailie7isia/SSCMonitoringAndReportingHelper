@@ -156,12 +156,25 @@ The application:
 * appends the domain to the filename when two companies share a display name.
 
 SecurityScorecard allows 5,000 API requests per rolling hour and applies a
-stricter, unpublished limit to Detailed report generation. Report requests are
-therefore sent one at a time, and status checks start every 15 seconds and slow
-to once a minute. When a request is rate-limited, the download waits for the
-time SecurityScorecard gives in its `Retry-After` header (or an estimated
-backoff when none is given) and then continues. The dashboard sidebar shows a
-countdown until requests resume.
+stricter, unpublished limit to Detailed report generation. A limited request
+gets HTTP 429 with a `Retry-After` header; nothing reports the remaining
+allowance, so the download learns it (see `Services/rate_limit.py`):
+
+* Report requests are sent one at a time, detailed reports at least 3 seconds
+  apart.
+* After a 429, every request to that endpoint waits out the same cooldown and
+  the gap between requests widens; it narrows again after a run of successes.
+* If a request is still limited right after waiting, `Retry-After` understated
+  the reset, so the wait escalates (1, 2, 5, 10, then 15 minutes). A report is
+  only given up on after 65 minutes of waiting for that one request, rather
+  than after a fixed number of retries.
+* Status checks start every 15 seconds and slow to once a minute.
+
+The **rate-limit timer** in the dashboard sidebar shows, while a download runs,
+the countdown to the next request or to the end of a limit, plus how many
+requests were sent and how many were limited. A limit hit by any other action
+shows a countdown to its reset. Each download ends with a one-line request
+summary in the Activity panel.
 
 ---
 
