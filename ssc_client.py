@@ -233,3 +233,34 @@ class SecurityScorecardClient:
             f"/companies/{domain}",
         )
         return r.json()
+
+    # Retrieve the company's current score, grade and issue summary for each
+    # of SecurityScorecard's ten risk factors.
+    def get_company_factors(
+        self,
+        domain: str,
+    ) -> list[dict]:
+        r = self._request(
+            "GET",
+            f"/companies/{domain}/factors",
+        )
+        return r.json().get("entries", [])
+
+    # Retrieve the company's factor scores over time. "monthly" returns one
+    # averaged entry per month for about the last year.
+    def get_factor_history(
+        self,
+        domain: str,
+        *,
+        timing: str = "monthly",
+        date_from: str | None = None,
+    ) -> list[dict]:
+        params = {"timing": timing}
+        if date_from:
+            params["date_from"] = date_from
+        r = self._request(
+            "GET",
+            f"/companies/{domain}/history/factors/score",
+            params=params,
+        )
+        return r.json().get("entries", [])

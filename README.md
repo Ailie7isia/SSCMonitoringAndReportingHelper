@@ -202,6 +202,30 @@ workbook, set the `SSC_SCORE_HISTORY_PATH` environment variable to its full
 
 ---
 
+### 4. Factor History
+
+SecurityScorecard rates every domain on 10 risk factors (Application Security,
+Cubit Score, DNS Health, Endpoint Security, Hacker Chatter, IP Reputation,
+Information Leak, Network Security, Patching Cadence and Social Engineering).
+**Update score history** also saves each domain's factor scores and issue counts
+to a **Factor History** sheet in the same workbook: one row per domain per
+update, with a score column and an issue-count column for every factor.
+
+The first time a domain is updated, any of the past 12 months missing from the
+sheet are backfilled from SecurityScorecard's monthly factor history. Those
+rows are marked `SSC monthly history` and hold monthly averages; rows saved by
+the helper are marked `Live`.
+
+In the dashboard:
+
+* **Factors** shows every domain's factor scores for a chosen month, coloured
+  by grade. Select a domain to open its factor history.
+* **Kalbe.co.id factors** is a dedicated view of kalbe.co.id: the latest score,
+  change since the previous month and issue count for each factor, and a
+  month-by-month table.
+
+---
+
 ## Testing
 
 The test suite runs offline against a fake SecurityScorecard client and a

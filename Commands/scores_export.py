@@ -12,6 +12,7 @@ if str(PROJECT_DIR) not in sys.path:
 from models import Company
 from config import CONFIG_PATH, load_config, validate_ssc_config
 from constants import OPTION_VENDORS
+from Services.factors import update_factor_history
 from Services.portfolio import companies_for_cycle_action, companies_from_payload
 from Services.scores import SCORE_HISTORY_PATH, append_score_history, display_scores
 from ssc_client import SecurityScorecardClient
@@ -109,6 +110,16 @@ def main(argv: list[str] | None = None) -> None:
             appended,
             args.history,
         )
+
+        # Record the ten factor scores alongside, backfilling missing past months.
+        factor_update = update_factor_history(client, companies, args.cycle, args.history)
+        logging.info(
+            "Saved factor scores for %d domains (%d past months backfilled).",
+            factor_update.live,
+            factor_update.backfilled,
+        )
+        if factor_update.failed:
+            logging.warning("Factor scores unavailable for: %s", ", ".join(factor_update.failed))
 
     # Exit gracefully if the operation is cancelled by the user.
     except KeyboardInterrupt:

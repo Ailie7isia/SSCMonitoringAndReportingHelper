@@ -38,6 +38,12 @@ class FakeClient:
         self.create_rate_limits = 0
         self.rate_limit_retry_after: float | None = 42
         self.list_recent_calls = 0
+        # domain -> {factor: (score, issue types)} for GET /companies/{domain}/factors
+        self.factors: dict[str, dict[str, tuple[float, int]]] = {}
+        # domain -> [(ISO date, {factor: score})] for the monthly factor history
+        self.factor_history: dict[str, list[tuple[str, dict[str, float]]]] = {}
+        self.factor_history_calls: list[str] = []
+        self.fail_factors: set[str] = set()
         self._ids = itertools.count(1)
         self._lock = threading.Lock()
 
@@ -47,6 +53,28 @@ class FakeClient:
     def get_company(self, domain: str) -> dict:
         score, grade = self.scores.get(domain.lower(), (None, ""))
         return {"domain": domain, "score": score, "grade": grade}
+
+    def get_company_factors(self, domain: str) -> list[dict]:
+        if domain.lower() in self.fail_factors:
+            raise ApiRequestError("Forbidden", status_code=403)
+        return [
+            {
+                "name": key,
+                "score": score,
+                "grade": "A",
+                "issue_summary": [
+                    {"severity": "medium", "type": f"issue_{index}", "count": 2} for index in range(issues)
+                ] + [{"severity": "positive", "type": "good_practice", "count": 1}],
+            }
+            for key, (score, issues) in self.factors.get(domain.lower(), {}).items()
+        ]
+
+    def get_factor_history(self, domain: str, *, timing: str = "monthly", date_from: str | None = None) -> list[dict]:
+        self.factor_history_calls.append(domain.lower())
+        return [
+            {"date": date, "factors": [{"name": key, "score": score} for key, score in scores.items()]}
+            for date, scores in self.factor_history.get(domain.lower(), [])
+        ]
 
     def add_company(self, portfolio_id: str, domain: str) -> None:
         if domain in self.fail_add:

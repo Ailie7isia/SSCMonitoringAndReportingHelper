@@ -7,6 +7,7 @@ import logging
 import os
 import queue
 import threading
+import tkinter as tk
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tkinter import messagebox
@@ -25,6 +26,16 @@ from Services.portfolio import (
     compute_plan,
     target_domains,
 )
+from Services.factors import (
+    FACTORS,
+    HISTORY_SOURCE,
+    SHORT_LABELS,
+    FactorSnapshot,
+    grade_for_score,
+    latest_by_month,
+    read_factor_history,
+    update_factor_history,
+)
 from Services.reports import download_reports
 from Services.scores import (
     SCORE_HISTORY_PATH,
@@ -32,6 +43,7 @@ from Services.scores import (
     current_month_history_status,
     grade_statistics,
     score_change_over_past_month,
+    score_sheet,
     score_trends_from_history,
 )
 from Services.rate_limit import RateLimitStatus
@@ -51,6 +63,9 @@ REPORT_GRADE_STYLES = {
     "D": ("D (60 – 69)", "#D5312E", "#FFFFFF"),
     "F": ("F (di bawah 60)", "#8B1A1A", "#FFFFFF"),
 }
+TABLE_BG = "#0E1821"
+# The organisation's own domain, which gets a dedicated factor view.
+KALBE_DOMAIN = "kalbe.co.id"
 
 
 class QueueLogHandler(logging.Handler):
@@ -79,6 +94,7 @@ class Dashboard(ctk.CTk):
         self.active_cycle: int | None = None
         self.trends_page: ctk.CTkFrame | None = None
         self.report_page: ctk.CTkFrame | None = None
+        self.factors_page: ctk.CTkFrame | None = None
         self._rate_limit_resume_at: datetime | None = None
         self._rate_limit_job: str | None = None
         self._rate_limit_state: RateLimitStatus | None = None
@@ -102,6 +118,8 @@ class Dashboard(ctk.CTk):
         self._side_button(sidebar, "▣   Dashboard", self.show_dashboard)
         self._side_button(sidebar, "↗   Scores Trend", self.open_score_trends)
         self._side_button(sidebar, "▤   Report", self.open_report_page)
+        self._side_button(sidebar, "◧   Factors", self.open_factor_page)
+        self._side_button(sidebar, "★   Kalbe.co.id factors", self.open_kalbe_factors)
         self.sidebar_status = ctk.CTkLabel(
             sidebar,
             text="●  Ready",
@@ -753,13 +771,7 @@ class Dashboard(ctk.CTk):
 
     def _show_score_trends(self, history_trends: dict[str, object]) -> None:
         """Display the loaded score history in the trend page."""
-        if self.report_page is not None:
-            self.report_page.destroy()
-            self.report_page = None
-        if self.trends_page is not None:
-            self.trends_page.destroy()
-        self.dashboard_header.grid_remove()
-        self.dashboard_body.grid_remove()
+        self._hide_dashboard_for_page()
 
         self.trends_page = ctk.CTkFrame(self, fg_color=BACKGROUND, corner_radius=0)
         self.trends_page.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(31, 23), pady=(0, 20))
@@ -924,7 +936,7 @@ class Dashboard(ctk.CTk):
         latest: dict[tuple[int, int, str], tuple[datetime, Company]] = {}
         workbook = load_workbook(SCORE_HISTORY_PATH, read_only=True, data_only=True)
         try:
-            for timestamp, domain, company_name, score, grade in workbook.active.iter_rows(
+            for timestamp, domain, company_name, score, grade in score_sheet(workbook).iter_rows(
                 min_row=3, max_col=5, values_only=True
             ):
                 if not isinstance(timestamp, datetime) or not domain:
@@ -970,13 +982,7 @@ class Dashboard(ctk.CTk):
 
     def _show_report_page(self, snapshots: dict[str, list[Company]]) -> None:
         """Render the workbook-backed monthly grade heatmap."""
-        if self.trends_page is not None:
-            self.trends_page.destroy()
-            self.trends_page = None
-        if self.report_page is not None:
-            self.report_page.destroy()
-        self.dashboard_header.grid_remove()
-        self.dashboard_body.grid_remove()
+        self._hide_dashboard_for_page()
 
         self.report_page = ctk.CTkScrollableFrame(self, fg_color=BACKGROUND, corner_radius=0)
         self.report_page.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(31, 23), pady=(0, 20))
@@ -1037,16 +1043,290 @@ class Dashboard(ctk.CTk):
         selector.configure(command=render_month)
         render_month()
 
+    def _destroy_pages(self) -> None:
+        for name in ("trends_page", "report_page", "factors_page"):
+            page = getattr(self, name)
+            if page is not None:
+                page.destroy()
+                setattr(self, name, None)
+
+    def _hide_dashboard_for_page(self) -> None:
+        """Clear the dashboard, or any other page, before an in-window page is built."""
+        self._destroy_pages()
+        self.dashboard_header.grid_remove()
+        self.dashboard_body.grid_remove()
+
     def show_dashboard(self) -> None:
         """Return from an in-window page to the main dashboard."""
-        if self.trends_page is not None:
-            self.trends_page.destroy()
-            self.trends_page = None
-        if self.report_page is not None:
-            self.report_page.destroy()
-            self.report_page = None
+        self._destroy_pages()
         self.dashboard_header.grid()
         self.dashboard_body.grid()
+
+    # Factors -------------------------------------------------------------------------
+
+    def open_factor_page(self) -> None:
+        """Load factor history and show every domain's factor scores by month."""
+        if self.busy:
+            return
+
+        def load() -> None:
+            snapshots = read_factor_history()
+            self.after(0, lambda: self._show_factor_page(snapshots))
+
+        self._run("Loading factor history", load, show_loading_overlay=False)
+
+    def open_kalbe_factors(self) -> None:
+        """Load factor history and show the dedicated kalbe.co.id view."""
+        if self.busy:
+            return
+
+        def load() -> None:
+            snapshots = read_factor_history()
+            self.after(0, lambda: self._show_domain_factors(KALBE_DOMAIN, snapshots))
+
+        self._run(f"Loading {KALBE_DOMAIN} factors", load, show_loading_overlay=False)
+
+    @staticmethod
+    def _factor_cell(parent: tk.Misc, score: float | None) -> tk.Label:
+        """A grade-colored score cell. Plain Tk labels keep large tables quick to draw."""
+        grade = grade_for_score(score)
+        return tk.Label(
+            parent,
+            text="—" if score is None else f"{score:.0f}",
+            width=6,
+            bg=GRADE_COLORS.get(grade, PANEL_ALT),
+            fg="#10202A" if grade in GRADE_COLORS else MUTED,
+            font=("Segoe UI", 11, "bold"),
+            pady=3,
+        )
+
+    @staticmethod
+    def _table_heading(parent: tk.Misc, text: str, *, anchor: str = "center") -> tk.Label:
+        return tk.Label(
+            parent,
+            text=text,
+            anchor=anchor,
+            justify="center",
+            wraplength=80,
+            bg=TABLE_BG,
+            fg=MUTED,
+            font=("Segoe UI", 10, "bold"),
+        )
+
+    def _page_header(
+        self,
+        page: ctk.CTkFrame,
+        title: str,
+        subtitle: str,
+        back: Callable[[], None],
+        back_text: str = "←  Dashboard",
+    ) -> None:
+        ctk.CTkButton(
+            page, text=back_text, command=back, width=170, height=32,
+            fg_color="transparent", hover_color=PANEL_ALT, anchor="w", font=("Segoe UI", 14),
+        ).grid(row=0, column=0, sticky="w", padx=4, pady=(22, 0))
+        ctk.CTkLabel(page, text=title, font=("Segoe UI", 25, "bold")).grid(row=1, column=0, sticky="w", padx=4, pady=(13, 0))
+        ctk.CTkLabel(
+            page, text=subtitle, font=("Segoe UI", 14), text_color=MUTED, justify="left", anchor="w", wraplength=700,
+        ).grid(row=2, column=0, sticky="w", padx=4, pady=(2, 14))
+
+    @staticmethod
+    def _factor_change(score: float | None, prior: float | None, prior_label: str) -> tuple[str, str]:
+        if score is None or prior is None:
+            return "No earlier month", MUTED
+        change = score - prior
+        if round(change) > 0:
+            return f"↑ +{change:.0f} vs {prior_label}", ACCENT
+        if round(change) < 0:
+            return f"↓ −{abs(change):.0f} vs {prior_label}", "#EE5D69"
+        return f"→ No change vs {prior_label}", MUTED
+
+    def _show_factor_page(self, snapshots: list[FactorSnapshot]) -> None:
+        """Every domain's ten factor scores for one month, colored by grade."""
+        self._hide_dashboard_for_page()
+        page = ctk.CTkFrame(self, fg_color=BACKGROUND, corner_radius=0)
+        page.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(31, 23), pady=(0, 20))
+        page.grid_columnconfigure(0, weight=1)
+        page.grid_rowconfigure(3, weight=1)
+        self.factors_page = page
+        self._page_header(
+            page,
+            "Factors",
+            "SecurityScorecard's 10 risk factors for each domain, from the newest saved snapshot "
+            "in the selected month. Select a domain to see its history.",
+            self.show_dashboard,
+        )
+        by_domain = latest_by_month(snapshots)
+        months = sorted({month for saved in by_domain.values() for month in saved}, reverse=True)
+        if not months:
+            ctk.CTkLabel(
+                page,
+                text="No factor history yet. Run “Update score history” to pull factor scores "
+                "and backfill the past 12 months.",
+                font=("Segoe UI", 14),
+                text_color=MUTED,
+            ).grid(row=3, column=0, sticky="nw", padx=4)
+            return
+        month_by_label = {f"{datetime(year, month, 1):%B %Y}": (year, month) for year, month in months}
+
+        content = ctk.CTkFrame(page, fg_color=PANEL, corner_radius=14)
+        content.grid(row=3, column=0, sticky="nsew", padx=4, pady=(0, 8))
+        content.grid_columnconfigure(0, weight=1)
+        content.grid_rowconfigure(1, weight=1)
+        controls = ctk.CTkFrame(content, fg_color="transparent")
+        controls.grid(row=0, column=0, sticky="ew", padx=20, pady=(18, 12))
+        controls.grid_columnconfigure(2, weight=1)
+        period = ctk.StringVar(value=next(iter(month_by_label)))
+        # "Active" needs a refreshed portfolio; without one, show every saved domain.
+        mode = ctk.StringVar(value="Active" if self.current_companies else "All")
+        search_text = ctk.StringVar()
+        selector = ctk.CTkOptionMenu(
+            controls, values=list(month_by_label), variable=period, width=170,
+            font=("Segoe UI", 13), dropdown_font=("Segoe UI", 13),
+        )
+        selector.grid(row=0, column=0, sticky="w", padx=(0, 12))
+        switcher = ctk.CTkSegmentedButton(controls, values=["Active", "All"], variable=mode, font=("Segoe UI", 13))
+        switcher.grid(row=0, column=1, sticky="w", padx=(0, 12))
+        ctk.CTkEntry(
+            controls, textvariable=search_text, placeholder_text="Search domains…", height=32, font=("Segoe UI", 13),
+        ).grid(row=0, column=2, sticky="ew")
+        table = ctk.CTkScrollableFrame(content, fg_color=TABLE_BG, corner_radius=9)
+        table.grid(row=1, column=0, sticky="nsew", padx=20, pady=(0, 20))
+        # Without a minimum, a narrow window squeezes the stretchy domain column to nothing.
+        table.grid_columnconfigure(0, weight=1, minsize=190)
+        active = {normalize_domain(company.domain) for company in self.current_companies}
+
+        def back_to_factors() -> None:
+            self._show_factor_page(snapshots)
+
+        def render(*_args: object) -> None:
+            for widget in table.winfo_children():
+                widget.destroy()
+            self._table_heading(table, "DOMAIN", anchor="w").grid(row=0, column=0, sticky="ew", padx=(8, 12), pady=(8, 6))
+            for column, key in enumerate(FACTORS, start=1):
+                self._table_heading(table, SHORT_LABELS[key].upper()).grid(row=0, column=column, padx=1, pady=(8, 6))
+            month = month_by_label[period.get()]
+            query = search_text.get().strip().lower()
+            rows = [
+                (domain, saved[month])
+                for domain, saved in by_domain.items()
+                if month in saved
+                and (mode.get() == "All" or domain in active)
+                and (not query or query in domain)
+            ]
+            if not rows:
+                tk.Label(
+                    table, text="No domains match this month, filter and search.",
+                    bg=TABLE_BG, fg=MUTED, font=("Segoe UI", 12),
+                ).grid(row=1, column=0, columnspan=len(FACTORS) + 1, sticky="w", padx=8, pady=10)
+                return
+            for row, (domain, snapshot) in enumerate(sorted(rows, key=lambda item: item[0]), start=1):
+                link = tk.Label(
+                    table, text=domain, anchor="w", cursor="hand2",
+                    bg=TABLE_BG, fg="#5E9BFF", font=("Segoe UI", 12, "bold"),
+                )
+                link.grid(row=row, column=0, sticky="ew", padx=(8, 12), pady=1)
+                link.bind(
+                    "<Button-1>",
+                    lambda _event, selected=domain: self._show_domain_factors(selected, snapshots, back=back_to_factors),
+                )
+                for column, key in enumerate(FACTORS, start=1):
+                    self._factor_cell(table, snapshot.scores.get(key)).grid(row=row, column=column, padx=1, pady=1)
+
+        selector.configure(command=render)
+        switcher.configure(command=render)
+        search_text.trace_add("write", render)
+        render()
+
+    def _show_domain_factors(
+        self,
+        domain: str,
+        snapshots: list[FactorSnapshot],
+        *,
+        back: Callable[[], None] | None = None,
+    ) -> None:
+        """One domain's factors: the latest snapshot as cards, then scores month by month."""
+        domain = normalize_domain(domain)
+        self._hide_dashboard_for_page()
+        page = ctk.CTkScrollableFrame(self, fg_color=BACKGROUND, corner_radius=0)
+        page.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(31, 23), pady=(0, 20))
+        page.grid_columnconfigure(0, weight=1)
+        self.factors_page = page
+        back_command = back or self.show_dashboard
+        back_text = "←  Factors" if back else "←  Dashboard"
+        saved = latest_by_month(snapshots).get(domain, {})
+        if not saved:
+            self._page_header(
+                page,
+                domain,
+                f"No factor history for {domain} yet. Run “Update score history” while it is in the "
+                "portfolio to pull its factor scores and backfill the past 12 months.",
+                back_command,
+                back_text,
+            )
+            return
+
+        months = sorted(saved)
+        latest = saved[months[-1]]
+        previous = saved[months[-2]] if len(months) > 1 else None
+        prior_label = f"{datetime(*previous.month, 1):%b %Y}" if previous else ""
+        taken = latest.retrieved.replace(tzinfo=timezone.utc).astimezone()
+        subtitle = f"Latest snapshot {taken:%d %b %Y} ({latest.source.lower()})"
+        if previous:
+            subtitle += f" · changes compared with {prior_label}"
+        self._page_header(page, domain, subtitle, back_command, back_text)
+
+        cards = ctk.CTkFrame(page, fg_color="transparent")
+        cards.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        cards.grid_columnconfigure(tuple(range(5)), weight=1, uniform="factor")
+        for index, (key, label) in enumerate(FACTORS.items()):
+            score = latest.scores.get(key)
+            card = ctk.CTkFrame(cards, fg_color=PANEL, corner_radius=12)
+            card.grid(row=index // 5, column=index % 5, sticky="nsew", padx=4, pady=4)
+            ctk.CTkLabel(
+                card, text=label.upper(), font=("Segoe UI", 11, "bold"), text_color=MUTED, wraplength=150, justify="left",
+            ).pack(anchor="w", padx=14, pady=(12, 0))
+            ctk.CTkLabel(
+                card,
+                text="—" if score is None else f"{score:.0f}",
+                font=("Segoe UI", 26, "bold"),
+                text_color=GRADE_COLORS.get(grade_for_score(score), MUTED),
+            ).pack(anchor="w", padx=14)
+            change_text, change_color = self._factor_change(
+                score, previous.scores.get(key) if previous else None, prior_label
+            )
+            ctk.CTkLabel(card, text=change_text, font=("Segoe UI", 12, "bold"), text_color=change_color).pack(anchor="w", padx=14)
+            issues = latest.issues.get(key)
+            issues_text = "Issues not recorded" if issues is None else f"{issues} issue{'' if issues == 1 else 's'}"
+            ctk.CTkLabel(card, text=issues_text, font=("Segoe UI", 12), text_color=MUTED).pack(anchor="w", padx=14, pady=(0, 12))
+
+        history = ctk.CTkFrame(page, fg_color=PANEL, corner_radius=14)
+        history.grid(row=4, column=0, sticky="ew", padx=4, pady=(4, 8))
+        history.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(history, text="Factor scores by month", font=("Segoe UI", 17, "bold")).grid(
+            row=0, column=0, sticky="w", padx=20, pady=(16, 2)
+        )
+        shown = months[-12:]
+        if any(saved[month].source == HISTORY_SOURCE for month in shown):
+            ctk.CTkLabel(
+                history,
+                text="* Monthly average from SecurityScorecard's history; other months are snapshots saved by this helper.",
+                font=("Segoe UI", 12),
+                text_color=MUTED,
+            ).grid(row=1, column=0, sticky="w", padx=20)
+        grid = tk.Frame(history, bg=TABLE_BG)
+        grid.grid(row=2, column=0, sticky="ew", padx=20, pady=(8, 18))
+        grid.grid_columnconfigure(0, weight=1)
+        self._table_heading(grid, "FACTOR", anchor="w").grid(row=0, column=0, sticky="ew", padx=(8, 12), pady=(8, 6))
+        for column, month in enumerate(shown, start=1):
+            marker = "*" if saved[month].source == HISTORY_SOURCE else ""
+            self._table_heading(grid, f"{datetime(*month, 1):%b %y}{marker}").grid(row=0, column=column, padx=1, pady=(8, 6))
+        for row, (key, label) in enumerate(FACTORS.items(), start=1):
+            tk.Label(grid, text=label, anchor="w", bg=TABLE_BG, fg="#DCE6EE", font=("Segoe UI", 12)).grid(
+                row=row, column=0, sticky="ew", padx=(8, 12), pady=1
+            )
+            for column, month in enumerate(shown, start=1):
+                self._factor_cell(grid, saved[month].scores.get(key)).grid(row=row, column=column, padx=1, pady=1)
 
     def close_score_trends(self) -> None:
         """Compatibility alias for the score-trend back control."""
@@ -1085,6 +1365,19 @@ class Dashboard(ctk.CTk):
             self.after(0, self._update_history_status)
             scope = "for the live portfolio" if self.active_cycle in (None, 1) else "excluding pinned domains"
             self._log(f"✓ Added {appended} score records {scope} to {SCORE_HISTORY_PATH}.")
+            factor_update = update_factor_history(
+                client,
+                companies,
+                self.active_cycle or "Live portfolio",
+                on_status=lambda status: self.after(0, lambda: self._show_rate_limit_status(status)),
+            )
+            backfilled = (
+                f", and backfilled {factor_update.backfilled} past month(s)" if factor_update.backfilled else ""
+            )
+            self._log(f"✓ Saved factor scores for {factor_update.live} domain(s){backfilled}.")
+            if factor_update.failed:
+                listed = ", ".join(factor_update.failed[:5]) + ("…" if len(factor_update.failed) > 5 else "")
+                self._log(f"✗ Factor scores unavailable for {len(factor_update.failed)} domain(s): {listed}")
         self._run("Updating live portfolio score history", export)
 
 

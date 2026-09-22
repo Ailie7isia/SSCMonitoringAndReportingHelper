@@ -32,6 +32,24 @@ GRADE_FILLS = {
     "D": "EE5D69",
     "F": "C93546",
 }
+# Sheet holding factor scores (see Services/factors.py); every other sheet
+# lookup in this module means the score history.
+FACTOR_SHEET = "Factor History"
+
+
+def score_sheet(workbook, *, create: bool = False):
+    """Return the score-history sheet: the first sheet that is not the factor sheet.
+
+    ``workbook.active`` is whichever sheet was selected when the file was last
+    saved, so after the workbook is saved in Excel on the Factor History tab it
+    would point there. Readers use this lookup instead.
+    """
+    for worksheet in workbook.worksheets:
+        if worksheet.title != FACTOR_SHEET:
+            return worksheet
+    if create:
+        return workbook.create_sheet("Score History", 0)
+    raise KeyError("The workbook has no score-history sheet.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +82,7 @@ def score_trends_from_history(
     observations: dict[str, list[tuple[datetime, float]]] = {}
     try:
         workbook = load_workbook(history_file, read_only=True, data_only=True)
-        worksheet = workbook.active
+        worksheet = score_sheet(workbook)
         for timestamp, logged_domain, _name, score, _grade in worksheet.iter_rows(
             min_row=3, max_col=5, values_only=True
         ):
@@ -121,8 +139,8 @@ def score_change_over_past_month(
         return None
     try:
         workbook = load_workbook(history_file, read_only=True, data_only=True)
-        worksheet = workbook.active
-        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=30)
+        worksheet = score_sheet(workbook)
+        cutoff =datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=30)
         baseline: tuple[datetime, float] | None = None
         for timestamp, logged_domain, _name, score, _grade in worksheet.iter_rows(
             min_row=1,
@@ -166,11 +184,10 @@ def append_score_history(
         )
     if output_file.exists():
         workbook = load_workbook(output_file)
-        worksheet = workbook.active
     else:
         output_file.parent.mkdir(parents=True, exist_ok=True)
         workbook = Workbook()
-        worksheet = workbook.active
+    worksheet = score_sheet(workbook, create=True)
 
     if worksheet["A1"].value is None:
         worksheet.merge_cells("A1:F1")
@@ -232,7 +249,7 @@ def current_month_history_status(
     count = 0
     try:
         workbook = load_workbook(history_file, read_only=True, data_only=True)
-        worksheet = workbook.active
+        worksheet = score_sheet(workbook)
         for row in worksheet.iter_rows(min_row=3, max_col=6, values_only=True):
             timestamp, logged_cycle = row[0], row[5]
             if cycle is not None and logged_cycle != cycle:
